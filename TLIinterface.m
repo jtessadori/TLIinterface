@@ -10,6 +10,7 @@ classdef TLIinterface < handle
         estimateTimer;
         intercomTimer;
         figureUpdateTimer;
+        bufferHistory;
         gazePos;
         screenRes;
         fileName;
@@ -17,7 +18,6 @@ classdef TLIinterface < handle
         outputLog;
         listener;
         classifiersLibrary;
-        bufferHistory;
         classEst;
         STIGclassEst;
         calClassEst;
@@ -25,15 +25,15 @@ classdef TLIinterface < handle
         STIGclassOut;
         calClassOut;
         classOutLP=0;
-        classHist;
-        estCovHist;
-        dataCovHist;
+        libraryClassification;
+        estCov;
+        dataCov;
         currTime;
         motorSerialPort;
         figureParams;
         currTarget;
         calibrationClassifier;
-        deadZone=0.2;
+        confidenceThreshold=0.05;
     end
     
     properties (Hidden)
@@ -41,9 +41,11 @@ classdef TLIinterface < handle
         instanceName;
         lastDataBlock;
         timingParams;
-        estCov;
         isCalibrating=0;
         retry=0;
+        timeSinceTrialStart=Inf;
+        estimateTimes;
+        isTrialOngoing=0;
     end
     
     methods
@@ -77,6 +79,8 @@ classdef TLIinterface < handle
             
             % Define timing parameters common to experiment and calibration
             obj.timingParams.winLength=1; % Window length, in seconds, used to perform intention estimation
+            obj.timingParams.CDlength=3;
+            obj.timingParams.MIlength=3; % This will be exact time for calibration, minimum time during experiment
             
             % Determine name to be used to save file upon closing
             obj.fileName=datestr(now,30);
@@ -90,11 +94,6 @@ classdef TLIinterface < handle
             % Perform a countdown to allow amplifier to settle
             obj.startCountdown(20);
             
-            % Start logging trial times (first one is going to be
-            % inccorect, but there's no way of actually knowing when
-            % Fanny's interface launches)
-            obj.outputLog.trialStartTimes=obj.currTime;
-            
             % Load classifier library
             load('clsfrLib.mat')
             obj.classifiersLibrary=clsfrLibrary;
@@ -107,7 +106,7 @@ classdef TLIinterface < handle
             obj.estimateTimer=timer;
             obj.estimateTimer.ExecutionMode='FixedSpacing';
             obj.figureUpdateTimer.StartDelay=2;
-            obj.estimateTimer.Period=0.2;
+            obj.estimateTimer.Period=0.1;
             obj.estimateTimer.TimerFcn=@obj.estimateIntention;
             start(obj.estimateTimer);
         end
@@ -179,11 +178,6 @@ classdef TLIinterface < handle
         end
         
         function startCalibration(obj)
-            % Define time paramters for calibration
-            obj.timingParams.preCDlength=1;
-            obj.timingParams.CDlength=5;
-            obj.timingParams.postCDlength=.5;
-            
             % Initialize devices
             obj.isCalibrating=1;
             obj.initialize;
@@ -244,19 +238,17 @@ classdef TLIinterface < handle
         
         function updateTrial(obj,~,~)
             try
-                if isempty(obj.outputLog)||~isfield(obj.outputLog,'trialStartTimes')
+                if isnan(obj.timeSinceTrialStart)
                     return;
                 end
-                timeSinceTrialStart=obj.currTime-obj.outputLog.trialStartTimes(end);
-                textString=sprintf('%d',ceil(obj.timingParams.preCDlength+obj.timingParams.CDlength-(obj.currTime-obj.outputLog.trialStartTimes(end))));
-                if timeSinceTrialStart>=obj.timingParams.preCDlength+obj.timingParams.CDlength+obj.timingParams.postCDlength
-                    obj.beginTrial;
-                elseif timeSinceTrialStart>=obj.timingParams.preCDlength+obj.timingParams.CDlength
+                textString=sprintf('%d',ceil(obj.timingParams.CDlength-obj.timeSinceTrialStart));
+                if obj.timeSinceTrialStart>=obj.timingParams.CDlength+obj.timingParams.MIlength
+                    obj.endTrial;
+                elseif obj.timeSinceTrialStart>=obj.timingParams.CDlength
                     set(obj.figureParams.CDtext,'visible','off');
-                elseif timeSinceTrialStart>=obj.timingParams.preCDlength
+                else 
                     set(obj.figureParams.CDtext,'string',textString,'visible','on');
                 end
-%                 fprintf('Pos: %0.4f, speed: %0.4f\n',obj.cursorPos,obj.cursorSpeed);
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
@@ -265,75 +257,21 @@ classdef TLIinterface < handle
         
         function beginTrial(obj)
             try
-                % Log incoming data and covariance matrix, if one is available
-                % and labelled
-                if ~isempty(obj.lastDataBlock)&&~(length(unique(obj.lastDataBlock))==1)&&~isempty(obj.currTarget)
-%                     %                 isTargetCorrect=rand<0.55;
-%                     if ~isempty(obj.currTarget)
-%                         isTargetCorrect=1;
-%                         tempTarget=obj.currTarget;
-%                         if ~isTargetCorrect
-%                             tempTarget=1-tempTarget;
-%                         end
-%                         obj.lastDataBlock=[zeros(size(obj.lastDataBlock,1)-16,16);eye(16)]*chol(squeeze(obj.classifiersLibrary(1).karchMeans(tempTarget+1,:,:)))*sqrt(size(obj.lastDataBlock,1));
-%                     end
-                    reshapedData=reshape(obj.lastDataBlock,1,size(obj.lastDataBlock,1),size(obj.lastDataBlock,2));
-                    if isempty(obj.bufferHistory)
-                        obj.bufferHistory=reshapedData;
-                        obj.dataCovHist=reshape(cov(squeeze(reshapedData(:,end-obj.timingParams.winLength*obj.fs+1:end,:))),1,size(reshapedData,3),size(reshapedData,3));
-                        obj.outputLog.targetLog=obj.currTarget;
-                    else
-                        obj.bufferHistory=cat(1,obj.bufferHistory,reshapedData);
-                        obj.dataCovHist=cat(1,obj.dataCovHist,reshape(cov(squeeze(reshapedData(:,end-obj.timingParams.winLength*obj.fs+1:end,:))),1,size(reshapedData,3),size(reshapedData,3)));
-                        obj.outputLog.targetLog=cat(1,obj.outputLog.targetLog,obj.currTarget);
+                if obj.isCalibrating
+                    % Decide new target
+                    obj.currTarget=rand>.5;
+                    
+                    % Generate text string, if it does not exist already
+                    if ~isfield(obj.figureParams,'CDtext')
+                        obj.figureParams.CDtext=text(obj.screenRes(1)*0.5,obj.screenRes(2)*0.4,'75','HorizontalAlignment','Center','VerticalAlignment','Middle','FontSize',64,'visible','off');
                     end
                     
-                    % Log current classification
-                    if ~isempty(obj.STIGclassEst)
-                        if ~isfield(obj.outputLog,'STIGclassEst')
-                            obj.outputLog.STIGclassEst=obj.STIGclassEst;
-                        else
-                            obj.outputLog.STIGclassEst=cat(1,obj.outputLog.STIGclassEst,obj.STIGclassEst);
-                        end
-                    end
-                    if ~isempty(obj.calClassEst)
-                        if ~isfield(obj.outputLog,'calClassEst')
-                            obj.outputLog.calClassEst=obj.calClassEst;
-                        else
-                            obj.outputLog.calClassEst=cat(1,obj.outputLog.calClassEst,obj.calClassEst);
-                        end
-                    end
-                    if ~isempty(obj.calClassEst)
-                        if isfield(obj.outputLog,'classEst')
-                            obj.outputLog.classEst=cat(1,obj.outputLog.classEst,obj.classEst);
-                        else
-                            obj.outputLog.classEst=obj.classEst;
-                        end
-                    end
-                    
-                    % Update STIG data
-                    obj.updateSTIGdata;
+                    % Color selected target
+                    set(obj.figureParams.target(obj.currTarget+1),'FaceColor',[.1,.6,.1]);
+                    set(obj.figureParams.target(2-obj.currTarget),'FaceColor',[.7,.7,.7]);
+                else
+                    obj.isTrialOngoing=1;
                 end
-                
-                % Decide new target
-                obj.currTarget=rand>.5;
-                
-                % Generate text string, if it does not exist already
-                if ~isfield(obj.figureParams,'CDtext')
-                    obj.figureParams.CDtext=text(obj.screenRes(1)*0.5,obj.screenRes(2)*0.4,'75','HorizontalAlignment','Center','VerticalAlignment','Middle','FontSize',64,'visible','off');
-                end
-                
-                % Color selected target
-                set(obj.figureParams.target(obj.currTarget+1),'FaceColor',[.1,.6,.1]);
-                set(obj.figureParams.target(2-obj.currTarget),'FaceColor',[.7,.7,.7]);
-                
-                % Interrupt tactile feedback and clear low-pass classEst
-                obj.classOutLP=0;
-                fprintf(obj.motorSerialPort,'e12\n');
-                fprintf(obj.motorSerialPort,'r0\n');
-                
-                % Train classifier
-                obj.trainClassifier;
                 
                 % Log trial data
                 if isfield(obj.outputLog,'trialStartTimes')
@@ -347,29 +285,45 @@ classdef TLIinterface < handle
             end
         end
         
-        function updateSTIGdata(obj)
-            % Compute an estimation with one each of the available
-            % classifiers
-            tempEst=zeros(1,length(obj.classifiersLibrary));
-            for currClsfr=1:length(obj.classifiersLibrary)
-                tempEst(currClsfr)=(obj.classifiersLibrary(currClsfr).predict(obj.lastDataBlock)-.5)*2;
-            end
-            if isempty(obj.classHist)
-                obj.classHist=tempEst;
+        function endTrial(obj)
+            % Train classifier and start new trial, if this is calibration session.
+            % Otherwise, provide response to Unity interface
+            if obj.isCalibrating
+                obj.trainClassifier;
+                obj.beginTrial;
             else
-                obj.classHist=cat(1,obj.classHist,tempEst);
-            end
-            if size(obj.classHist,1)<length(obj.classifiersLibrary)%||length(unique(classEst(1:currTrial)))<3%||C<3
-                obj.estCov=(obj.classHist(end,:)-mean(obj.classHist))'*(obj.classHist(end,:)-mean(obj.classHist));
+                obj.UDPtoInterface.step(uint8(num2str(obj.classEst)));
+                obj.isTrialOngoing=0;
             end
             
-            % Load covariance matrix
-            if ~isempty(obj.estCov)
-                if isempty(obj.estCovHist)
-                    obj.estCovHist=reshape(obj.estCov,1,size(obj.estCov,1),size(obj.estCov,2));
-                else
-                    obj.estCovHist=cat(1,obj.estCovHist,reshape(obj.estCov,1,size(obj.estCov,1),size(obj.estCov,2)));
+            % Interrupt tactile feedback and clear low-pass classEst
+            obj.classOutLP=0;
+            fprintf(obj.motorSerialPort,'e12\n');
+            fprintf(obj.motorSerialPort,'r0\n');
+        end
+        
+        function updateSTIGdata(obj)
+            try
+                % Compute an estimation with one each of the available
+                % classifiers
+                obj.libraryClassification=zeros(1,length(obj.classifiersLibrary));
+                for currClsfr=1:length(obj.classifiersLibrary)
+                    obj.libraryClassification(currClsfr)=(obj.classifiersLibrary(currClsfr).predict(obj.lastDataBlock)-.5)*2;
                 end
+                
+                % Update log of all classifications
+                logEntry(obj,{'libraryClassification'});
+                
+                % If possible, compute covariance of estimations
+                if size(obj.outputLog.libraryClassification,1)<length(obj.classifiersLibrary)
+                    obj.estCov(1,:,:)=(obj.outputLog.libraryClassification(end,:)-mean(obj.outputLog.libraryClassification))'*(obj.outputLog.libraryClassification(end,:)-mean(obj.outputLog.libraryClassification));
+                end
+                
+                % Log estimation covariance matrix
+                logEntry(obj,{'estCov'});
+            catch ME
+                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
+                keyboard;
             end
         end
         
@@ -377,19 +331,16 @@ classdef TLIinterface < handle
             try
                 % If at least one data window for each direction has been
                 % recorded, perform classification
-                if isfield(obj.outputLog,'targetLog')&&length(unique(obj.outputLog.targetLog))>1
+                if isfield(obj.outputLog,'currTarget')&&length(unique(obj.outputLog.currTarget))>1
                     % Compute Karcher means
-                    classTags=unique(obj.outputLog.targetLog);
-                    obj.calibrationClassifier.karchMeans=zeros(length(classTags),size(obj.dataCovHist,3),size(obj.dataCovHist,3));
-                    cellCovHist=cell(size(obj.dataCovHist,1),1);
-                    for currTrial=1:size(obj.dataCovHist,1)
-                        cellCovHist{currTrial}=squeeze(obj.dataCovHist(currTrial,:,:));
+                    classTags=unique(obj.outputLog.currTarget);
+                    obj.calibrationClassifier.karchMeans=zeros(length(classTags),size(obj.outputLog.dataCov,3),size(obj.outputLog.dataCov,3));
+                    cellCovHist=cell(size(obj.outputLog.dataCov,1),1);
+                    for currTrial=1:size(obj.outputLog.dataCov,1)
+                        cellCovHist{currTrial}=squeeze(obj.outputLog.dataCov(currTrial,:,:));
                     end
                     for currClass=1:length(classTags)
-                        relIdx=find(obj.outputLog.targetLog==classTags(currClass));
-%                         tempClassEst=[obj.outputLog.targetLog(1:length( obj.outputLog.targetLog)-length(obj.calClassEst));obj.calClassEst];
-%                         relIdx=find(obj.outputLog.targetLog==classTags(currClass)&obj.outputLog.targetLog==tempClassEst);
-%                         relIdx=relIdx(max(1,end-200):end);
+                        relIdx=find(obj.outputLog.currTarget==classTags(currClass));
                         obj.calibrationClassifier.karchMeans(currClass,:,:)=karcher(cellCovHist{relIdx}); %#ok<FNDSB>
                     end
                     if ~isfield(obj.calibrationClassifier,'Rdist1')
@@ -409,78 +360,85 @@ classdef TLIinterface < handle
         
         function estimateIntention(obj,~,~)
             try
-                % If no data blocks are availble, abort estimation.
-                % Otherwise, recover data belonging to this trial
-                if isempty(obj.lastDataBlock)||length(unique(obj.lastDataBlock))==1||(isempty(obj.outputLog)&&obj.isCalibrating)
+                % If last data block entirely occurred after end of count
+                % down, start estimation
+                if isnan(obj.timeSinceTrialStart)||(obj.isCalibrating&&obj.timeSinceTrialStart<obj.timingParams.winLength+obj.timingParams.CDlength)||(~obj.isCalibrating&&~obj.isTrialOngoing)
                     return;
                 end
-                timeSinceTrialStart=obj.currTime-obj.outputLog.trialStartTimes(end);
-                if obj.isCalibrating
-                    if timeSinceTrialStart<obj.timingParams.preCDlength||timeSinceTrialStart>=obj.timingParams.preCDlength+obj.timingParams.CDlength
-                        return;
-                    end
-                end
-%                     %                 isTargetCorrect=rand<0.55;
-%                     if ~isempty(obj.currTarget)
-%                         isTargetCorrect=1;
-%                         tempTarget=obj.currTarget;
-%                         if ~isTargetCorrect
-%                             tempTarget=1-tempTarget;
-%                         end
-%                         obj.lastDataBlock=[zeros(size(obj.lastDataBlock,1)-16,16);eye(16)]*chol(squeeze(obj.classifiersLibrary(1).karchMeans(tempTarget+1,:,:)))*sqrt(size(obj.lastDataBlock,1));
+                
+%                 % WARNING: The following will substitute actual data with
+%                 % phantom ones. Comment this part when actually running
+%                 % code.
+%                 isTargetCorrect=rand<1;
+%                 if ~isempty(obj.currTarget)
+%                     tempTarget=obj.currTarget;
+%                     if ~isTargetCorrect
+%                         tempTarget=1-tempTarget;
 %                     end
-                if obj.isCalibrating
-                    relSamples=(timeSinceTrialStart-obj.timingParams.preCDlength)*obj.fs;
-                else
-                    relSamples=timeSinceTrialStart*obj.fs;
-                end
-                relSamples=min(relSamples,obj.fs*obj.timingParams.winLength);
-                relData=obj.lastDataBlock(max(end-relSamples+1,1):end,:)*sqrt(relSamples/size(obj.lastDataBlock,1));
-                if size(relData,1)<3
+%                     obj.lastDataBlock(1,:,:)=[zeros(512*3-16,16);eye(16)]*chol(squeeze(obj.classifiersLibrary(1).karchMeans(tempTarget+1,:,:)));
+%                 else
+%                     return
+%                 end
+%                 fprintf('WARNING: phantom data is being processed!\n');
+                
+                % Compute current datablock covariance matrix
+                obj.dataCov=[];
+                obj.dataCov(1,:,:)=cov(squeeze(obj.lastDataBlock));
+                             
+                % Log data
+                obj.estimateTimes=obj.currTime;
+                obj.logEntry({'estimateTimes','lastDataBlock','dataCov','currTarget'});
+                
+                % Do not perform estimations unless at least one target per
+                % class has been observed
+                if obj.isCalibrating&&length(unique(obj.outputLog.currTarget))<2
                     return;
                 end
-                if ~isfield(obj.outputLog,'estimateTimes')
-                    obj.outputLog.estimateTimes=obj.currTime;
-                else
-                    obj.outputLog.estimateTimes=cat(1,obj.outputLog.estimateTimes,obj.currTime);
-                end
-
-                if isempty(obj.classHist)
-                    obj.STIGclassEst=obj.currTarget;
-                    obj.STIGclassOut=0;
-                else
-                    if size(obj.classHist,1)<length(obj.classifiersLibrary)%||length(unique(classEst(1:currTrial)))<3%||C<3
+                
+                % Update STIG data, then perform STIG estimation, unless
+                % experiment is being performed with previously trained
+                % classifier
+                if obj.isCalibrating||~isfield(obj.calibrationClassifier,'predict')
+                    obj.updateSTIGdata;
+                    if size(obj.outputLog.libraryClassification,1)<length(obj.classifiersLibrary)
                         % Use mode of existing classifiers for first trials
-                        obj.STIGclassEst=mode(obj.classHist(end,:));
+                        obj.STIGclassEst=mode(obj.outputLog.libraryClassification(end,:));
+                        obj.STIGclassOut=mean(obj.outputLog.libraryClassification(end,:));
                     else
                         % Use STIG if number of trials is sufficiently high (i.e.
                         % larger than number of available classifiers)
-                        Q=squeeze(sum(obj.estCovHist,1)/(length(obj.classHist)-1));
+                        Q=squeeze(sum(obj.outputLog.estCov,1)/(length(obj.outputLog.libraryClassification)-1));
                         [V,D]=eig(Q);
                         maxEigIdx=find(diag(D)==max(diag(D)),1);
                         v=V(:,maxEigIdx);
-                        obj.STIGclassOut=sum(obj.classHist(end,:).*v');
+                        obj.STIGclassOut=sum(obj.outputLog.libraryClassification(end,:).*v');
                         obj.STIGclassEst=sign(obj.STIGclassOut);
                     end
                     obj.STIGclassEst=(obj.STIGclassEst+1)/2;
+                    obj.logEntry({'STIGclassEst','STIGclassOut'});
+                    
+                    % Temporarily set classEst and classOut to STIG values
+                    % (will be changed later if calibrated classifier is better
+                    % performing)
+                    obj.classEst=obj.STIGclassEst;
+                    obj.classOut=obj.STIGclassOut;
                 end
-                obj.classEst=obj.STIGclassEst;
-                obj.classOut=obj.STIGclassOut;
                 
-                % If calibrated classifier, make a classification with
+                % If a calibrated classifier exists, make a classification with
                 % that, as well
-%                 calBAcc=0;
-%                 STIGBAcc=0;
                 if isfield(obj.calibrationClassifier,'predict')
                     % Perform prediction with calibration classifier
-                    obj.calClassEst=obj.calibrationClassifier.predict(relData);
-                    obj.calClassOut=obj.calibrationClassifier.out(relData);
+                    obj.calClassEst=obj.calibrationClassifier.predict(obj.lastDataBlock);
+                    obj.calClassOut=obj.calibrationClassifier.out(obj.lastDataBlock);
+                    obj.logEntry({'calClassEst','calClassOut'});
                     
-                    if isfield(obj.outputLog,'calClassEst')
+                    % If using a previosly calibrated classifier, ignore
+                    % STIG results
+                    if obj.isCalibrating
                         % Compare BAcc with that of STIG,
                         % on comparable windows
-                        calBAcc=testAcc(obj.outputLog.targetLog(end-length(obj.outputLog.calClassEst)+1:end),obj.outputLog.calClassEst);
-                        STIGBAcc=testAcc(obj.outputLog.targetLog(end-length(obj.outputLog.calClassEst)+1:end),obj.outputLog.STIGclassEst(end-length(obj.outputLog.calClassEst)+1:end));
+                        calBAcc=testAcc(obj.outputLog.currTarget(end-length(obj.outputLog.calClassEst)+1:end),obj.outputLog.calClassEst);
+                        STIGBAcc=testAcc(obj.outputLog.currTarget(end-length(obj.outputLog.calClassEst)+1:end),obj.outputLog.STIGclassEst(end-length(obj.outputLog.calClassEst)+1:end));
                         
                         % Set current classEst as prediction of classifier with
                         % higher BAcc
@@ -491,28 +449,46 @@ classdef TLIinterface < handle
                             obj.classEst=obj.STIGclassEst;
                             obj.classOut=obj.STIGclassOut;
                         end
+                    else
+                        obj.classEst=obj.calClassEst;
+                        obj.classOut=obj.calClassOut;
                     end
                 end
-                if ~obj.isCalibrating
-                    obj.classOut=obj.calClassOut;
+                obj.logEntry({'classEst','classOut'});
+                
+                % Compute number of relevant classifications (i.e. those
+                % belonging to current trial)
+                if obj.isCalibrating
+                    nRelEst=sum(obj.outputLog.estimateTimes>obj.outputLog.trialStartTimes(end)+obj.timingParams.CDlength+obj.timingParams.winLength);
+                else
+                    nRelEst=sum(obj.outputLog.estimateTimes>obj.outputLog.trialStartTimes(end)+obj.timingParams.winLength);
                 end
-%                 fprintf('currTarget: %d, calEst: %d, STIGest: %d, calBAcc: %0.2f, STIGBAcc: %0.2f\n',obj.currTarget,obj.calClassEst,obj.STIGclassEst,calBAcc,STIGBAcc);
+                
+                % Compute confidence level
+                P1=signtest(atan(obj.outputLog.classOut(end-nRelEst+1:end)),0,'tail','left'); % i.e. median is less than zero, intended direction is left
+                P2=signtest(atan(obj.outputLog.classOut(end-nRelEst+1:end)),0,'tail','right'); % i.e. median is less greater zero, intended direction is right
                 
                 % Set serial band vibration level
-                obj.classOutLP=obj.classOutLP+obj.classOut*.1;
-                if obj.classOutLP<0
-                    fprintf(obj.motorSerialPort,'e8\n');
-                    fprintf(obj.motorSerialPort,'r0\n');
-                    fprintf(obj.motorSerialPort,'e4\n');
-                else
-                    fprintf(obj.motorSerialPort,'e4\n');
-                    fprintf(obj.motorSerialPort,'r0\n');
-                    fprintf(obj.motorSerialPort,'e8\n');
+                if P1~=P2 % They should only be equal on first sample of new trial
+                    if P1<P2
+                        fprintf(obj.motorSerialPort,'e8\n');
+                        fprintf(obj.motorSerialPort,'r0\n');
+                        fprintf(obj.motorSerialPort,'e4\n');
+                    else
+                        fprintf(obj.motorSerialPort,'e4\n');
+                        fprintf(obj.motorSerialPort,'r0\n');
+                        fprintf(obj.motorSerialPort,'e8\n');
+                    end
+                    currVibrationValue=round((1-min(P1,P2))*80);
+                    fprintf(obj.motorSerialPort,sprintf('r%d\n',currVibrationValue));
                 end
-                currVibrationValue=round(abs(obj.classOutLP)*400);
-                fprintf(obj.motorSerialPort,sprintf('r%d\n',currVibrationValue));
-%                 fprintf('classOutLP: %0.2f\n',obj.classOutLP);
-%                 fprintf('vibration value: %d, classOutLP: %0.2f\n',currVibrationValue,obj.classOutLP);
+                fprintf('P1: %0.2f; P2: %0.2f; nRelEst: %d\n',P1,P2,nRelEst);
+                
+                % During experiment, conclude trial if either P1 or P2 is
+                % low enough and enough time has elapsed since trial start
+                if ~obj.isCalibrating&&(P1<obj.confidenceThreshold||P2<obj.confidenceThreshold)&&obj.timeSinceTrialStart>obj.timingParams.CDlength+obj.timingParams.MIlength
+                    obj.endTrial;
+                end
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
@@ -526,29 +502,10 @@ classdef TLIinterface < handle
                 if isempty(inString)&&~obj.retry
                     return;
                 end
+                
+                % When input from interface is received, start a new trial
                 fprintf('instring: %s\n',inString);
-                
-                % Determine value to send to interface, then send it
-                outValue=obj.classOut;%sign(obj.classOutLP)*(max(0,abs(obj.classOutLP)-obj.deadZone));
-                fprintf('outValue: %0.2f, classOutLP: %0.2f\n',outValue,obj.classOutLP);
-                if isempty(outValue) % Should only occur on first trial
-                    outValue=-1;
-                end
-                if abs(obj.classOutLP)<obj.deadZone
-                    obj.retry=1;
-                    return;
-                end
-                obj.retry=0;
-                %             outString=uint8(num2str(double(obj.gazePos.Y>obj.screenRes(2)*.5)));
-                outString=uint8(num2str(outValue>0));
-                obj.UDPtoInterface.step(outString);
-                obj.updateSTIGdata;
-                
-                % Interrupt tactile feedback and clear low-pass classEst
-                obj.classOutLP=0;
-                fprintf(obj.motorSerialPort,'e12\n');
-                fprintf(obj.motorSerialPort,'r0\n');
-                obj.outputLog.trialStartTimes=cat(1,obj.outputLog.trialStartTimes,obj.currTime);
+                obj.beginTrial;
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
@@ -581,7 +538,7 @@ classdef TLIinterface < handle
         end
         
         function newDataAvailable(obj,block,~)
-            obj.lastDataBlock=block.OutputPort(1).Data;
+            obj.lastDataBlock(1,:,:)=block.OutputPort(1).Data;
         end
         
         function prepareSerialPort(obj)
@@ -650,6 +607,21 @@ classdef TLIinterface < handle
             close(obj.figureParams.handle);
         end
         
+        function logEntry(obj,fieldNames)
+            try
+                for currField=1:length(fieldNames)
+                    if isempty(obj.outputLog)||~isfield(obj.outputLog,fieldNames{currField})
+                        obj.outputLog.(fieldNames{currField})=obj.(fieldNames{currField});
+                    else
+                        obj.outputLog.(fieldNames{currField})=cat(1,obj.outputLog.(fieldNames{currField}),obj.(fieldNames{currField}));
+                    end
+                end
+            catch ME
+                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
+                keyboard;
+            end
+        end
+        
         %% Dependent properties
         function res=get.screenRes(~)
             res=get(0,'screensize');
@@ -662,6 +634,14 @@ classdef TLIinterface < handle
         
         function cTime=get.currTime(obj)
             cTime=get_param(obj.modelName,'SimulationTime');
+        end
+        
+        function tsts=get.timeSinceTrialStart(obj)
+            if ~isempty(obj.outputLog)&&isfield(obj.outputLog,'trialStartTimes')
+                tsts=obj.currTime-obj.outputLog.trialStartTimes(end);
+            else
+                tsts=NaN;
+            end
         end
     end
     
