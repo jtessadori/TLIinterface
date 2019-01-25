@@ -18,7 +18,7 @@ classdef TLIinterface < handle
         motorSerialPort;
         figureParams;
         targetPos;
-        itsPerTrial;
+        maxItsPerTrial;
         currIts;
         MIdata;
         MIcov;
@@ -33,6 +33,7 @@ classdef TLIinterface < handle
         trialData;
         trialEst;
         trialClassifier;
+        trialScore;
         cursorPos;
         movDirection;
         movCorrect;
@@ -105,15 +106,15 @@ classdef TLIinterface < handle
             end
             clear S
             
-            obj.isDebugging=0;
+            obj.isDebugging=1;
             if obj.isDebugging
                 fprintf('Warning: running in debug mode\n');
                 obj.timingParams.restLength=.5;
                 obj.timingParams.MIlength=2;
                 obj.timingParams.winLims=[0.5,1.5]; % Beginning and end, in seconds after MI start, of time time window used for training
                 obj.timingParams.winLength=obj.timingParams.winLims(2)-obj.timingParams.winLims(1); % Window length, in seconds, used to perform intention estimation
-                obj.timingParams.FBlength=.3;
-                obj.timingParams.interTrialLength=.3;
+                obj.timingParams.FBlength=.25;
+                obj.timingParams.interTrialLength=.25;
             else
                 % Define timing parameters common to experiment and calibration
                 obj.timingParams.restLength=2;
@@ -125,7 +126,7 @@ classdef TLIinterface < handle
             end
             
             % Determing number of iterations before implementing a choice
-            obj.itsPerTrial=3;
+            obj.maxItsPerTrial=7;
             
             % Determine name to be used to save file upon closing
             obj.fileName=datestr(now,30);
@@ -345,12 +346,6 @@ classdef TLIinterface < handle
                     % Reset number of iterations so far
                     obj.currIts=0;
                     
-%                     % lastDataBlock might still be empty on startup, wait
-%                     % for data from EEG system before moving on
-%                     while isempty(obj.lastDataBlock)
-%                         pause(0.1);
-%                     end
-                    
                     % Start timer for next event
                     obj.trialEventTimer=timer;
                     obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
@@ -408,7 +403,11 @@ classdef TLIinterface < handle
                 % Provide feedback by changing expected destination target
                 % to selection result
                 set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-                set(obj.figureParams.squareHandles(obj.cursorPos+obj.MIest),'FaceColor',obj.colorScheme.cursorColorRest);
+                if ~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
+                    set(obj.figureParams.squareHandles(obj.cursorPos+obj.trialEst),'FaceColor',obj.colorScheme.cursorColorRest);
+                else
+                    set(obj.figureParams.squareHandles(obj.cursorPos+obj.MIest),'FaceColor',obj.colorScheme.cursorColorRest);
+                end
                 obj.logEntry({'movDirection','movCorrect'});
                 
                 % Start timer for new event
@@ -462,12 +461,14 @@ classdef TLIinterface < handle
                 case 'trial'
                     % Perform prediction
                     if isempty(obj.trialClassifier)
-                        obj.trialEst=mode(obj.outputLog.MIest(max(end-obj.itsPerTrial+1,1):end));
+                        obj.trialEst=mode(obj.outputLog.MIest(max(end-obj.maxItsPerTrial+1,1):end));
+                        obj.trialScore=0;
                     else
-                        obj.trialEst=obj.trialClassifier.clsfr.predict(obj.trialData');
+                        [obj.trialEst,obj.trialScore]=obj.trialClassifier.clsfr.predict(obj.trialData');
+                        obj.trialScore=obj.trialScore(1);
                         fprintf('%d\n',obj.trialEst);
                     end
-                    obj.logEntry({'trialEst'});
+                    obj.logEntry({'trialEst','trialScore'});
             end
         end
         
@@ -479,7 +480,7 @@ classdef TLIinterface < handle
                 % If debugging, substitute actual data with phantom
                 % data
                 if obj.isDebugging
-                    obj.errPdata=squeeze(obj.phantomData((obj.targetPos==(obj.MIest+2))+1,1:floor(obj.timingParams.FBlength*obj.fs),:))+randn(floor(obj.timingParams.FBlength*obj.fs),16)/100;
+                    obj.errPdata=squeeze(obj.phantomData((obj.targetPos==(obj.movDirection+2))+1,1:floor(obj.timingParams.FBlength*obj.fs),:))+randn(floor(obj.timingParams.FBlength*obj.fs),16)/100;
                 end
                 obj.logEntry({'errPdata'});
                 
@@ -493,12 +494,14 @@ classdef TLIinterface < handle
                 obj.logEntry({'trialData'});
                 
                 % Remove feedback and restore target current position
-                set(obj.figureParams.squareHandles(obj.cursorPos+obj.MIest),'FaceColor',obj.colorScheme.bg);
+                set(obj.figureParams.squareHandles(obj.cursorPos+obj.movDirection),'FaceColor',obj.colorScheme.bg);
                 
-                % Start timer for new event
+                % Decider whether to start new trial or new iteration, then
+                % set timer for new event
                 obj.trialEventTimer=timer;
                 obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
-                if obj.currIts<obj.itsPerTrial
+                trialEndCondition=prod(obj.outputLog.trialEst(max(end-obj.currIts+1,1):end))>0&&(1-prod(min(obj.outputLog.trialScore(max(1,end-obj.currIts+1):end),1-obj.outputLog.trialScore(max(1,end-obj.currIts+1):end))))>0.99;
+                if ~trialEndCondition&&obj.currIts<obj.maxItsPerTrial
                     set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.cursorColorMI,'EdgeColor',obj.colorScheme.bg);
                     obj.trialEventTimer.TimerFcn=@obj.performIteration;
                 else
@@ -518,13 +521,20 @@ classdef TLIinterface < handle
         function endTrial(obj,~,~)
             try
                 % Make decision on last trial estimations
-                obj.finalEst=mode(obj.outputLog.trialEst(max(1,end-obj.itsPerTrial+1):end));
+                obj.finalEst=mode(obj.outputLog.trialEst(max(1,end-obj.currIts+1):end));
                 obj.finalLbls=sign(obj.targetPos-obj.cursorPos);
                 obj.logEntry({'finalEst','finalLbls'});
                 
                 % Provide feedback on final trial estimation
                 set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
                 set(obj.figureParams.squareHandles(obj.cursorPos+obj.finalEst),'FaceColor',obj.colorScheme.targetColor,'EdgeColor',obj.colorScheme.bg);
+                
+                % If accuracy in the last 15 iterations for trial
+                % classifier is >90%, close calibration
+                if obj.isCalibrating&&sum(obj.outputLog.trialScore~=0)>15&&mean(obj.outputLog.trialEst(end-15+1:end)==sign(obj.outputLog.targetPos(end-15+1:end)-obj.outputLog.cursorPos(end-15+1:end)))>0.9
+                    fprintf('Target accuracy reached, shutting down.\n');
+                    obj.stopCalibration;
+                end
                 
                 % Wait before starting new trial
                 obj.trialEventTimer=timer;
@@ -556,7 +566,6 @@ classdef TLIinterface < handle
                     if ~obj.isTrainingOngoing
                         % Update past super-trials covariance matrices with
                         % avaiable class means
-                        fprintf('%d\n',length(obj.outputLog.targetPos));
                         for currTrial=1:length(obj.outputLog.targetPos)-1
                             superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',squeeze(obj.outputLog.errPdata(currTrial,:,:)));
                             obj.outputLog.errPsuperTrialCov(currTrial,:,:)=cov(superTrial);
@@ -586,7 +595,7 @@ classdef TLIinterface < handle
                     
                     if all(nMIests)~=0&&all(nErrPests)~=0
                         %% Trial classifier
-                        actualMove=obj.outputLog.MIest;
+                        actualMove=obj.outputLog.movDirection;
                         MIscore2=obj.outputLog.errPscore;
                         MIscore2(actualMove==-1)=-MIscore2(actualMove==-1);
                         relIdx=(MIscore2~=0)&(obj.outputLog.MIscore~=0);
@@ -594,11 +603,12 @@ classdef TLIinterface < handle
                             % MIscore2 can occasionally grow to very large
                             % numbers, providing numerical issues. Solve this
                             MIscore2(abs(MIscore2)>100)=100*sign(MIscore2(abs(MIscore2)>100));
-                            obj.trialClassifier.clsfr=fitNaiveBayes([obj.outputLog.MIscore(relIdx)+randn(size(obj.outputLog.MIscore(relIdx)))/100,MIscore2(relIdx)+randn(size(MIscore2(relIdx)))/100],obj.outputLog.targetPos(relIdx)-2);
+                            obj.trialClassifier.clsfr=fitcsvm([obj.outputLog.MIscore(relIdx)+randn(size(obj.outputLog.MIscore(relIdx)))/100,MIscore2(relIdx)+randn(size(MIscore2(relIdx)))/100],obj.outputLog.targetPos(relIdx)-2);
                         else
 %                             obj.trialClassifier.clsfr=fitNaiveBayes([obj.outputLog.MIscore(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2);
                             obj.trialClassifier.clsfr=fitcsvm([obj.outputLog.MIscore(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
                         end
+                        obj.trialClassifier.clsfr=obj.trialClassifier.clsfr.fitPosterior;
                     end
                 end
             catch ME
@@ -833,7 +843,11 @@ classdef TLIinterface < handle
         end
         
         function md=get.movDirection(obj)
-            md=sign(obj.MIest);
+            if ~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
+                md=sign(obj.trialEst);
+            else
+                md=sign(obj.MIest);
+            end
         end
         
         function mc=get.movCorrect(obj)
