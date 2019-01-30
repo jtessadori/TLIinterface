@@ -9,6 +9,7 @@ classdef TLIinterface < handle
         UDPfromET;
         intercomTimer;
         trialEventTimer;
+        MIanimationTimer;
         screenRes;
         fileName;
         fs;
@@ -17,6 +18,7 @@ classdef TLIinterface < handle
         currTime;
         motorSerialPort;
         figureParams;
+        targetCharacter;
         targetPos;
         maxItsPerTrial;
         currIts;
@@ -34,11 +36,13 @@ classdef TLIinterface < handle
         trialEst;
         trialClassifier;
         trialScore;
-        cursorPos;
         movDirection;
         movCorrect;
         finalEst;
         finalLbls;
+        selectionTree;
+        selLevel;
+        phrase;
     end
     
     properties (Hidden)
@@ -57,6 +61,8 @@ classdef TLIinterface < handle
         phantomData=cat(1,reshape(repmat(hann(512),1,16)*randn(16),1,512,16),reshape(repmat(blackman(512),1,16)*randn(16),1,512,16))
         isTrainingOngoing=0;
         nTrials=[0,0];
+        targetCharacterIdx;
+        selHistory=[];
     end
     
     methods
@@ -106,7 +112,7 @@ classdef TLIinterface < handle
             end
             clear S
             
-            obj.isDebugging=1;
+            obj.isDebugging=0;
             if obj.isDebugging
                 fprintf('Warning: running in debug mode\n');
                 obj.timingParams.restLength=.5;
@@ -117,17 +123,14 @@ classdef TLIinterface < handle
                 obj.timingParams.interTrialLength=.25;
             else
                 % Define timing parameters common to experiment and calibration
-                obj.timingParams.restLength=2;
-                obj.timingParams.MIlength=4;
-                obj.timingParams.winLims=[2.5,3.5]; % Beginning and end, in seconds after MI start, of time time window used for training
+                obj.timingParams.restLength=.5;
+                obj.timingParams.MIlength=3;
+                obj.timingParams.winLims=[1.5,3]; % Beginning and end, in seconds after MI start, of time time window used for training
                 obj.timingParams.winLength=obj.timingParams.winLims(2)-obj.timingParams.winLims(1); % Window length, in seconds, used to perform intention estimation
-                obj.timingParams.FBlength=2;
-                obj.timingParams.interTrialLength=2;
+                obj.timingParams.FBlength=1;
+                obj.timingParams.interTrialLength=.75;
             end
-            
-            % Determing number of iterations before implementing a choice
-            obj.maxItsPerTrial=7;
-            
+                        
             % Determine name to be used to save file upon closing
             obj.fileName=datestr(now,30);
 
@@ -138,7 +141,7 @@ classdef TLIinterface < handle
             obj.prepareSimulinkModel;
             
             % Perform a countdown to allow amplifier to settle
-            obj.startCountdown(3);
+            obj.startCountdown(30);
         end
         
         function startExperiment(obj)
@@ -148,26 +151,19 @@ classdef TLIinterface < handle
             
             % Define interface object colors
             obj.colorScheme.bg=[.05,.05,.05];
+            obj.colorScheme.textColor=[0,.4,0];
             obj.colorScheme.edgeColor=[.4,.4,.4];
             obj.colorScheme.targetColor=[.4,0,.1];
             obj.colorScheme.cursorColorMI=[0,.4,0];
             obj.colorScheme.cursorColorRest=[.6,.6,0];
             
-            % Define figure properties
-            % Squares
+            % Define cursor square
             obj.figureParams.squareSide=obj.screenRes(1)/15;
-            obj.figureParams.squareCenterX=obj.screenRes(1)/2+[-obj.screenRes(1)/10,0,obj.screenRes(1)/10];
-            obj.figureParams.squareCenterY=repmat(obj.screenRes(2)/2,3,1);
             obj.figureParams.squareVertexX=[-1,1,1,-1]*obj.figureParams.squareSide/2;
             obj.figureParams.squareVertexY=[-1,-1,1,1]*obj.figureParams.squareSide/2;
-            % Arrows
-            obj.figureParams.leftArrow.X=[-1,-.4,-.4,1,1,-.4,-.4]*obj.figureParams.squareSide;
-            obj.figureParams.leftArrow.Y=[0,.5,.2,.2,-.2,-.2,-.5]*obj.figureParams.squareSide;
-            obj.figureParams.rightArrow.X=[-1,.4,.4,1,.4,.4,-1]*obj.figureParams.squareSide;
-            obj.figureParams.rightArrow.Y=[.2,.2,.5,0,-.5,-.2,-.2]*obj.figureParams.squareSide;
-            obj.figureParams.headlessArrow.X=[-1,1,1,-1]*obj.figureParams.squareSide;
-            obj.figureParams.headlessArrow.Y=[.2,.2,-.2,-.2]*obj.figureParams.squareSide;
-            
+            obj.figureParams.selDotsX=cos(linspace(0,2*pi*(1-1/40),40));
+            obj.figureParams.selDotsY=sin(linspace(0,2*pi*(1-1/40),40));
+                        
             % Create figure
             obj.figureParams.handle=gcf;
             set(obj.figureParams.handle,'Tag',mfilename,...
@@ -190,30 +186,23 @@ classdef TLIinterface < handle
             set(gca,'YDir','reverse');
             axis('off')
             
-            % Plot squares
-            for currSquare=1:length(obj.figureParams.squareCenterX)
-                obj.figureParams.squareHandles(currSquare)=patch(obj.figureParams.squareCenterX(currSquare)+obj.figureParams.squareVertexX,obj.figureParams.squareCenterY(currSquare)+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-            end
+            % Generate standard selection tree
+            obj.selectionTree=TLIinterface.generateSelectionTree;
+            
+            % Generate text objects
+            obj.figureParams.currentPhrase=text(obj.screenRes(1)*.5,obj.screenRes(2)*.3,'','Color',obj.colorScheme.textColor,'FontSize',24,'HorizontalAlignment','Center');
+            obj.figureParams.letters(1)=text(obj.screenRes(1)*.3,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
+            obj.figureParams.letters(2)=text(obj.screenRes(1)*.7,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
+            
+            % Add cursor square
+            obj.figureParams.cursorHandle=patch(obj.screenRes(1)/2+obj.figureParams.squareVertexX,obj.screenRes(2)/2+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+            
+            % Add selection dots
+            obj.figureParams.selectionDot(1)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off');
+            obj.figureParams.selectionDot(2)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off');
             
             % Begin actual calibration
-            obj.beginTrial;
-%             obj.initialize;
-%             
-%             % Launch gaze tracker and Unity interface
-%             %             !C:\Code\Sources\GazeTrackEyeXGazeStream\GazeTrackEyeXGazeStream.exe &
-%             !C:\Code\2018_12_TLI\TLIinterface\build\TLIinterface.exe &
-%             
-%             % Open incoming and outgoing udp ports
-%             obj.UDPtoInterface=dsp.UDPSender('RemoteIPPort',obj.portToInterface);
-%             obj.UDPfromInterface=dsp.UDPReceiver('LocalIPPort',obj.portFromInterface,'ReceiveBufferSize',26000,'MaximumMessageLength',26000);
-%             obj.UDPfromET=dsp.UDPReceiver('LocalIPPort',obj.portFromET,'ReceiveBufferSize',26000,'MaximumMessageLength',26000);
-%             
-%             % Start a timer to handle communication with interface
-%             obj.intercomTimer=timer;
-%             obj.intercomTimer.ExecutionMode='FixedRate';
-%             obj.intercomTimer.Period=0.1;
-%             obj.intercomTimer.TimerFcn=@obj.intercomHandling;
-%             start(obj.intercomTimer);
+            obj.beginSelection;
         end
         
         function closeActivity(obj)
@@ -267,26 +256,19 @@ classdef TLIinterface < handle
             
             % Define interface object colors
             obj.colorScheme.bg=[.05,.05,.05];
+            obj.colorScheme.textColor=[0,.4,0];
             obj.colorScheme.edgeColor=[.4,.4,.4];
             obj.colorScheme.targetColor=[.4,0,.1];
             obj.colorScheme.cursorColorMI=[0,.4,0];
             obj.colorScheme.cursorColorRest=[.6,.6,0];
             
-            % Define figure properties
-            % Squares
+            % Define cursor square
             obj.figureParams.squareSide=obj.screenRes(1)/15;
-            obj.figureParams.squareCenterX=obj.screenRes(1)/2+[-obj.screenRes(1)/10,0,obj.screenRes(1)/10];
-            obj.figureParams.squareCenterY=repmat(obj.screenRes(2)/2,3,1);
             obj.figureParams.squareVertexX=[-1,1,1,-1]*obj.figureParams.squareSide/2;
             obj.figureParams.squareVertexY=[-1,-1,1,1]*obj.figureParams.squareSide/2;
-            % Arrows
-            obj.figureParams.leftArrow.X=[-1,-.4,-.4,1,1,-.4,-.4]*obj.figureParams.squareSide;
-            obj.figureParams.leftArrow.Y=[0,.5,.2,.2,-.2,-.2,-.5]*obj.figureParams.squareSide;
-            obj.figureParams.rightArrow.X=[-1,.4,.4,1,.4,.4,-1]*obj.figureParams.squareSide;
-            obj.figureParams.rightArrow.Y=[.2,.2,.5,0,-.5,-.2,-.2]*obj.figureParams.squareSide;
-            obj.figureParams.headlessArrow.X=[-1,1,1,-1]*obj.figureParams.squareSide;
-            obj.figureParams.headlessArrow.Y=[.2,.2,-.2,-.2]*obj.figureParams.squareSide;
-            
+            obj.figureParams.selDotsX=cos(linspace(0,2*pi*(1-1/40),40))*obj.figureParams.squareSide/4;
+            obj.figureParams.selDotsY=sin(linspace(0,2*pi*(1-1/40),40))*obj.figureParams.squareSide/4;
+                        
             % Create figure
             obj.figureParams.handle=gcf;
             set(obj.figureParams.handle,'Tag',mfilename,...
@@ -309,13 +291,23 @@ classdef TLIinterface < handle
             set(gca,'YDir','reverse');
             axis('off')
             
-            % Plot squares
-            for currSquare=1:length(obj.figureParams.squareCenterX)
-                obj.figureParams.squareHandles(currSquare)=patch(obj.figureParams.squareCenterX(currSquare)+obj.figureParams.squareVertexX,obj.figureParams.squareCenterY(currSquare)+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-            end
+            % Generate standard selection tree
+            obj.selectionTree=TLIinterface.generateSelectionTree;
+            
+            % Generate text objects
+            obj.figureParams.currentPhrase=text(obj.screenRes(1)*.5,obj.screenRes(2)*.3,'','Color',obj.colorScheme.textColor,'FontSize',24,'HorizontalAlignment','Center');
+            obj.figureParams.letters(1)=text(obj.screenRes(1)*.3,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
+            obj.figureParams.letters(2)=text(obj.screenRes(1)*.7,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
+            
+            % Add cursor square
+            obj.figureParams.cursorHandle=patch(obj.screenRes(1)/2+obj.figureParams.squareVertexX,obj.screenRes(2)/2+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+            
+            % Add selection dots
+            obj.figureParams.selectionDot(1)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off','EdgeColor',obj.colorScheme.edgeColor);
+            obj.figureParams.selectionDot(2)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off','EdgeColor',obj.colorScheme.edgeColor);
             
             % Begin actual calibration
-            obj.beginTrial;
+            obj.beginSelection;
         end
          
         function stopCalibration(obj)
@@ -324,36 +316,62 @@ classdef TLIinterface < handle
             
             obj.closeActivity;
         end
+        
+        function beginSelection(obj)
+            try                
+                if obj.isCalibrating
+                    % Decide new target caharacter
+                    obj.targetCharacterIdx=ceil(rand*length(obj.selectionTree.entries));
+                    obj.targetCharacter=obj.selectionTree.entries(obj.targetCharacterIdx);
+                    
+                    % Log data
+                    obj.logEntry({'targetCharacter','targetCharacterIdx'})
+                end
+                
+                % Set current selection level to 1, clear selection history
+                obj.selHistory=[];
+                obj.selLevel=1;
+                
+                % Move on to perform first selection
+                obj.beginTrial;
+            catch ME
+                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
+                keyboard;
+            end
+        end
                 
         function beginTrial(obj,~,~)
-            try
-%                 if obj.isCalibrating
-                    % Decide new target
-                    obj.targetPos=(rand>.5)*(length(obj.figureParams.squareCenterX)-1)+1;
-                    
-                    % Reset cursor pos
-                    obj.cursorPos=ceil(length(obj.figureParams.squareHandles)/2);
-                    
-                    % Reset square colors
-                    set(obj.figureParams.squareHandles,'EdgeColor',obj.colorScheme.edgeColor,'FaceColor',obj.colorScheme.bg);
-                    
-                    % Highlight selected target
-                    set(obj.figureParams.squareHandles(obj.targetPos),'EdgeColor',obj.colorScheme.targetColor);
-                    
-                    % Highlight cursor pos
-                    set(obj.figureParams.squareHandles(round(length(obj.figureParams.squareCenterX)/2)),'EdgeColor',obj.colorScheme.bg,'FaceColor',obj.colorScheme.cursorColorRest);
-                    
-                    % Reset number of iterations so far
-                    obj.currIts=0;
-                    
-                    % Start timer for next event
-                    obj.trialEventTimer=timer;
-                    obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
-                    obj.trialEventTimer.TimerFcn=@obj.performIteration;
-                    start(obj.trialEventTimer);
-%                 else
-%                     obj.isTrialOngoing=1;
-%                 end
+            try 
+                if obj.isCalibrating
+                    % Highlight background of correct choice
+                    obj.targetPos=obj.selectionTree.mat(obj.selLevel,obj.targetCharacterIdx);
+                    set(obj.figureParams.letters(:),'EdgeColor',obj.colorScheme.bg);
+                    set(obj.figureParams.letters(obj.targetPos),'EdgeColor',obj.colorScheme.targetColor);
+                end
+                
+                % Set content of left and right text boxes
+                tempMat=obj.selectionTree.mat;
+                if obj.selLevel>1
+                    tempMat(:,prod(obj.selectionTree.mat(1:obj.selLevel-1,:)==repmat(obj.selHistory,1,obj.selectionTree.nEntries),1)==0)=0;
+                    % If one text box is empty and the other one contains
+                    % only one element, immediately select it
+                    if numel(obj.selectionTree.entries(tempMat(obj.selLevel,:)==1))==0||numel(obj.selectionTree.entries(tempMat(obj.selLevel,:)==2))==0
+                        stop(obj.trialEventTimer);
+                        obj.endSelection;
+                        return;
+                    end
+                end
+                set(obj.figureParams.letters(1),'String',obj.selectionTree.entries(tempMat(obj.selLevel,:)==1),'BackgroundColor',obj.colorScheme.bg);
+                set(obj.figureParams.letters(2),'String',obj.selectionTree.entries(tempMat(obj.selLevel,:)==2),'BackgroundColor',obj.colorScheme.bg);
+                                                
+                % Reset number of iterations
+                obj.currIts=0;
+                
+                % Start timer for next event
+                obj.trialEventTimer=timer;
+                obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
+                obj.trialEventTimer.TimerFcn=@obj.performIteration;
+                start(obj.trialEventTimer);
                 
                 % Log trial data
                 obj.logTime('trialStartTimes');
@@ -368,12 +386,19 @@ classdef TLIinterface < handle
                 % Update iteration counter, change cursor color to signal
                 % beginning of MI task and start timer for new event
                 obj.currIts=obj.currIts+1;
-                obj.logEntry({'targetPos','currIts','cursorPos'});
-                set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.cursorColorMI);
+                obj.logEntry({'selLevel','currIts','targetPos'});
+                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI);
                 obj.trialEventTimer=timer;
                 obj.trialEventTimer.StartDelay=obj.timingParams.MIlength;
                 obj.trialEventTimer.TimerFcn=@obj.provideFeedback;
                 start(obj.trialEventTimer);
+                
+                % Start timer for MI animation
+                obj.MIanimationTimer=timer;
+                obj.MIanimationTimer.TimerFcn=@obj.updateMIanimation;
+                obj.MIanimationTimer.ExecutionMode='fixedRate';
+                obj.MIanimationTimer.Period=.05;
+                start(obj.MIanimationTimer);
                 
                 % Log trial data
                 obj.logTime('iterationTimes');
@@ -402,12 +427,8 @@ classdef TLIinterface < handle
                 
                 % Provide feedback by changing expected destination target
                 % to selection result
-                set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-                if ~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
-                    set(obj.figureParams.squareHandles(obj.cursorPos+obj.trialEst),'FaceColor',obj.colorScheme.cursorColorRest);
-                else
-                    set(obj.figureParams.squareHandles(obj.cursorPos+obj.MIest),'FaceColor',obj.colorScheme.cursorColorRest);
-                end
+                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+                set(obj.figureParams.letters(obj.movDirection),'BackgroundColor',obj.colorScheme.cursorColorRest);
                 obj.logEntry({'movDirection','movCorrect'});
                 
                 % Start timer for new event
@@ -418,60 +439,33 @@ classdef TLIinterface < handle
                 
                 % Log trial data
                 obj.logTime('feedbackStartTimes');
+                                
+                % Provide tactile feedback
+                stop(obj.MIanimationTimer);
+                switch obj.movDirection
+                    case 1
+                        fprintf(obj.motorSerialPort,'e8\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'r120\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'e4\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'r0\n');
+                    case 2
+                        fprintf(obj.motorSerialPort,'e4\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'r120\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'e8\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'r0\n');
+                end
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
             end
         end
-        
-        function classifyData(obj,dataType)
-            switch dataType
-                case 'MI'
-                    % Compute and store covariance matrix of current data
-                    obj.MIcov=cov(obj.MIdata);
-                    
-                    % Perform prediction, if a classifier is available
-                    if isempty(obj.MIclassifier)
-                        obj.MIest=sign(randn);
-                        obj.MIscore=0;
-                    else
-                        [obj.MIest,obj.MIscore]=obj.MIclassifier.predict(obj.MIclassifier,obj.MIcov);
-                    end
-                    obj.logEntry({'MIcov','MIest','MIscore'});
-                case 'errP'                    
-                    % Compute class means
-                    obj.nTrials(obj.movCorrect+1)=sum(obj.outputLog.movCorrect==obj.movCorrect);
-                    if ~isfield(obj.errPclassifier,'classMeans')%%||size(obj.errPclassifier.classMeans,1)<obj.targetPos
-                        obj.errPclassifier.classMeans=zeros(2,size(obj.errPdata,1),size(obj.errPdata,2));
-                    end
-                    obj.errPclassifier.classMeans(obj.movCorrect+1,:,:)=(squeeze(obj.errPclassifier.classMeans(obj.movCorrect+1,:,:))*obj.nTrials(obj.movCorrect+1)+obj.errPdata)/(obj.nTrials(obj.movCorrect+1)+1);
-                    
-                    % Compute and store super-trials covariance matrices
-                    superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',obj.errPdata);
-                    obj.errPsuperTrialCov=cov(superTrial);
-                    
-                    % Perform prediction
-                    if ~isfield(obj.errPclassifier,'predict')
-                        obj.errPest=round(rand);
-                        obj.errPscore=0;
-                    else
-                        [obj.errPest,obj.errPscore]=obj.errPclassifier.predict(obj.errPclassifier,obj.errPsuperTrialCov);
-                    end
-                    obj.logEntry({'errPsuperTrialCov','errPest','errPscore'});
-                case 'trial'
-                    % Perform prediction
-                    if isempty(obj.trialClassifier)
-                        obj.trialEst=mode(obj.outputLog.MIest(max(end-obj.maxItsPerTrial+1,1):end));
-                        obj.trialScore=0;
-                    else
-                        [obj.trialEst,obj.trialScore]=obj.trialClassifier.clsfr.predict(obj.trialData');
-                        obj.trialScore=obj.trialScore(1);
-                        fprintf('%d\n',obj.trialEst);
-                    end
-                    obj.logEntry({'trialEst','trialScore'});
-            end
-        end
-        
+                        
         function evaluateFeedback(obj,~,~)
             try
                 % Recover relevant data to perform errP classification and
@@ -484,28 +478,44 @@ classdef TLIinterface < handle
                 end
                 obj.logEntry({'errPdata'});
                 
+                % Stop feedback animation and VT feedback
+                set(obj.figureParams.selectionDot(:),'Visible','off');
+                fprintf(obj.motorSerialPort,'e12\n');
+                fprintf(obj.motorSerialPort,'r0\n');
+                
+                % If calibrating, log number of correct and erroneous
+                % movements
+                if obj.isCalibrating
+                    obj.nTrials(obj.movCorrect+1)=sum(obj.outputLog.movCorrect==obj.movCorrect);
+                end
+                
                 % Perform errP classification
                 obj.classifyData('errP');
                 
                 % Trial data is given by scores of estimation according to
                 % both classifiers. Perform trial prediction and log it
-                obj.trialData=[obj.MIscore;obj.errPscore*obj.movDirection];
+                obj.trialData=[obj.MIscore;obj.errPscore*sign(obj.movDirection-1.5)];
                 obj.classifyData('trial');
                 obj.logEntry({'trialData'});
                 
-                % Remove feedback and restore target current position
-                set(obj.figureParams.squareHandles(obj.cursorPos+obj.movDirection),'FaceColor',obj.colorScheme.bg);
+                % Remove feedback
+                set(obj.figureParams.letters(:),'BackgroundColor',obj.colorScheme.bg);
                 
                 % Decider whether to start new trial or new iteration, then
                 % set timer for new event
                 obj.trialEventTimer=timer;
                 obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
-                trialEndCondition=prod(obj.outputLog.trialEst(max(end-obj.currIts+1,1):end))>0&&(1-prod(min(obj.outputLog.trialScore(max(1,end-obj.currIts+1):end),1-obj.outputLog.trialScore(max(1,end-obj.currIts+1):end))))>0.99;
+                if isempty(obj.trialClassifier)||~isfield(obj.trialClassifier,'scoreTransform')
+                    trialEndCondition=1;
+                else
+                    relIdx=max(length(obj.outputLog.currIts)-obj.currIts+1,1):length(obj.outputLog.currIts);
+                    trialEndCondition=obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))>.8||obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))<.2;
+                end
                 if ~trialEndCondition&&obj.currIts<obj.maxItsPerTrial
-                    set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.cursorColorMI,'EdgeColor',obj.colorScheme.bg);
+                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI,'EdgeColor',obj.colorScheme.bg);
                     obj.trialEventTimer.TimerFcn=@obj.performIteration;
                 else
-                    set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.cursorColorRest,'EdgeColor',obj.colorScheme.bg);
+                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorRest,'EdgeColor',obj.colorScheme.bg);
                     obj.trialEventTimer.TimerFcn=@obj.endTrial;
                 end
                 start(obj.trialEventTimer);
@@ -521,25 +531,47 @@ classdef TLIinterface < handle
         function endTrial(obj,~,~)
             try
                 % Make decision on last trial estimations
-                obj.finalEst=mode(obj.outputLog.trialEst(max(1,end-obj.currIts+1):end));
-                obj.finalLbls=sign(obj.targetPos-obj.cursorPos);
-                obj.logEntry({'finalEst','finalLbls'});
+%                 obj.finalEst=mode(obj.outputLog.trialEst(max(1,end-obj.currIts+1):end));
+                obj.finalEst=(median(obj.outputLog.trialScore(max(1,end-obj.currIts+1):end))<0)+1;
+                if obj.isCalibrating
+                    obj.finalLbls=obj.targetPos;
+                    obj.logEntry({'finalLbls'});
+                end
+                obj.logEntry({'finalEst'});
+                
+                % Update selection history so far
+                obj.selHistory=cat(1,obj.selHistory,obj.finalEst);
                 
                 % Provide feedback on final trial estimation
-                set(obj.figureParams.squareHandles(obj.cursorPos),'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-                set(obj.figureParams.squareHandles(obj.cursorPos+obj.finalEst),'FaceColor',obj.colorScheme.targetColor,'EdgeColor',obj.colorScheme.bg);
+                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+                set(obj.figureParams.letters(obj.finalEst),'BackgroundColor',obj.colorScheme.targetColor,'EdgeColor',obj.colorScheme.bg);
                 
-                % If accuracy in the last 15 iterations for trial
-                % classifier is >90%, close calibration
-                if obj.isCalibrating&&sum(obj.outputLog.trialScore~=0)>15&&mean(obj.outputLog.trialEst(end-15+1:end)==sign(obj.outputLog.targetPos(end-15+1:end)-obj.outputLog.cursorPos(end-15+1:end)))>0.9
+                % Remove edge from target letters
+                set(obj.figureParams.letters(obj.targetPos),'EdgeColor',obj.colorScheme.bg);
+                drawnow;
+                
+                % If accuracy is high enough for trial classifier, close
+                % calibration
+                if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=400
                     fprintf('Target accuracy reached, shutting down.\n');
                     obj.stopCalibration;
+                    return;
+                else
+                    fprintf('%d/400\n',length(obj.outputLog.movCorrect));
+                end
+                
+                % Update selection counter. If last level is reached, end
+                % current selection
+                obj.trialEventTimer=timer;
+                obj.trialEventTimer.StartDelay=obj.timingParams.interTrialLength;
+                if obj.selLevel==obj.selectionTree.nSplits
+                    obj.trialEventTimer.TimerFcn=@obj.endSelection;
+                else
+                    obj.selLevel=obj.selLevel+1;
+                    obj.trialEventTimer.TimerFcn=@obj.beginTrial;
                 end
                 
                 % Wait before starting new trial
-                obj.trialEventTimer=timer;
-                obj.trialEventTimer.StartDelay=obj.timingParams.interTrialLength;
-                obj.trialEventTimer.TimerFcn=@obj.beginTrial;
                 start(obj.trialEventTimer);
                 
                 % Update classifiers with new data, if calibration is
@@ -555,18 +587,81 @@ classdef TLIinterface < handle
                 keyboard;
             end
         end
+        
+        function endSelection(obj,~,~)
+            try
+                % Add selected character to phrase and update display
+                obj.phrase=cat(2,obj.phrase,obj.selectionTree.entries{prod(obj.selectionTree.mat(1:length(obj.selHistory),:)==repmat(obj.selHistory,1,obj.selectionTree.nEntries))==1});
+                set(obj.figureParams.currentPhrase,'String',obj.phrase);
                 
+                % Begin new selection
+                obj.beginSelection;
+            catch ME
+                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
+                keyboard;
+            end
+        end
+        
+        function classifyData(obj,dataType)
+            switch dataType
+                case 'MI'
+                    % Compute and store covariance matrix of current data
+                    obj.MIcov=cov(obj.MIdata);
+                    
+                    % Perform prediction, if a classifier is available
+                    if isempty(obj.MIclassifier)
+                        obj.MIest=(rand>.5)+1;
+                        obj.MIscore=0;
+                    else
+                        [obj.MIest,obj.MIscore]=obj.MIclassifier.predict(obj.MIclassifier,obj.MIcov);
+                    end
+                    obj.logEntry({'MIcov','MIest','MIscore'});
+                case 'errP'
+                    % Perform prediction
+                    if ~isfield(obj.errPclassifier,'predict')
+                        obj.errPest=round(rand);
+                        obj.errPscore=0;
+                    else
+                        % Compute and store super-trials covariance matrices
+                        superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',obj.errPdata);
+                        obj.errPsuperTrialCov=cov(superTrial);
+                        [obj.errPest,obj.errPscore]=obj.errPclassifier.predict(obj.errPclassifier,obj.errPsuperTrialCov);
+                    end
+                    obj.logEntry({'errPsuperTrialCov','errPest','errPscore'});
+                case 'trial'
+                    % Perform prediction
+                    if isempty(obj.trialClassifier)
+                        obj.trialEst=mode(obj.outputLog.MIest(max(end-obj.maxItsPerTrial+1,1):end));
+                        obj.trialScore=0;
+                    else
+                        [obj.trialEst,obj.trialScore]=obj.trialClassifier.clsfr.predict(obj.trialData');
+                        obj.trialScore=obj.trialScore(1);
+                    end
+                    obj.logEntry({'trialEst','trialScore'});
+            end
+        end
+
         function updateClassifiers(obj)
             try
                 % Cannot train classifiers until at least one trial per
                 % class has been observed.
                 if min(obj.nTrials)>1&&length(unique(obj.outputLog.targetPos))>1
+                    
+                    %% MI classifier
+                    obj.MIclassifier=TLIinterface.trainClassifier(obj.MIclassifier,obj.outputLog.MIcov,obj.outputLog.targetPos);
+                    
+                    %% errP classifier
+                    % Compute class means
+                    obj.errPclassifier.classMeans(1,:,:)=median(obj.outputLog.errPdata(obj.outputLog.movCorrect==0,:,:));
+                    obj.errPclassifier.classMeans(2,:,:)=median(obj.outputLog.errPdata(obj.outputLog.movCorrect==1,:,:));
+                    
                     % If this is first time training classifiers, I need to
                     % update previous superTrials
                     if ~obj.isTrainingOngoing
                         % Update past super-trials covariance matrices with
                         % avaiable class means
-                        for currTrial=1:length(obj.outputLog.targetPos)-1
+                        obj.outputLog.errPsuperTrialCov=zeros(length(obj.outputLog.targetPos),3*size(obj.errPclassifier.classMeans,3),3*size(obj.errPclassifier.classMeans,3));
+                        for currTrial=1:length(obj.outputLog.targetPos)
                             superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',squeeze(obj.outputLog.errPdata(currTrial,:,:)));
                             obj.outputLog.errPsuperTrialCov(currTrial,:,:)=cov(superTrial);
                         end
@@ -574,10 +669,7 @@ classdef TLIinterface < handle
                         obj.isTrainingOngoing=1;    
                     end
                     
-                    %% MI classifier
-                    obj.MIclassifier=TLIinterface.trainClassifier(obj.MIclassifier,obj.outputLog.MIcov,obj.outputLog.targetPos-2);
-                    
-                    %% errP classifier
+                    % Train classifier
                     obj.errPclassifier=TLIinterface.trainClassifier(obj.errPclassifier,obj.outputLog.errPsuperTrialCov,obj.outputLog.movCorrect);
                     
                     % Cannot train trial classifier until at least two
@@ -585,7 +677,7 @@ classdef TLIinterface < handle
                     nMIests=zeros(2,1);
                     nErrPests=zeros(2,1);
                     for currClass=1:2
-                        relIdx=obj.outputLog.targetPos==1+(currClass-1)*2;
+                        relIdx=obj.outputLog.targetPos==currClass;
                         nMIests(currClass)=sum(obj.outputLog.MIscore(relIdx)~=0);
                     end
                     for currClass=1:2
@@ -596,19 +688,31 @@ classdef TLIinterface < handle
                     if all(nMIests)~=0&&all(nErrPests)~=0
                         %% Trial classifier
                         actualMove=obj.outputLog.movDirection;
+                        MIscore1=obj.outputLog.MIscore;
                         MIscore2=obj.outputLog.errPscore;
-                        MIscore2(actualMove==-1)=-MIscore2(actualMove==-1);
+                        MIscore2(actualMove==1)=-MIscore2(actualMove==1);
+                        % First estimations are bound to result in
+                        % abnormally large score values: blank outliers
+                        outlrsBlnk=@(x)x.*(abs(x)<7*mad(x,1));
+                        MIscore1=outlrsBlnk(MIscore1);
+                        MIscore2=outlrsBlnk(MIscore2);
                         relIdx=(MIscore2~=0)&(obj.outputLog.MIscore~=0);
-                        if obj.isDebugging
-                            % MIscore2 can occasionally grow to very large
-                            % numbers, providing numerical issues. Solve this
-                            MIscore2(abs(MIscore2)>100)=100*sign(MIscore2(abs(MIscore2)>100));
-                            obj.trialClassifier.clsfr=fitcsvm([obj.outputLog.MIscore(relIdx)+randn(size(obj.outputLog.MIscore(relIdx)))/100,MIscore2(relIdx)+randn(size(MIscore2(relIdx)))/100],obj.outputLog.targetPos(relIdx)-2);
-                        else
-%                             obj.trialClassifier.clsfr=fitNaiveBayes([obj.outputLog.MIscore(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2);
-                            obj.trialClassifier.clsfr=fitcsvm([obj.outputLog.MIscore(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+                        if sum(relIdx)>2&&length(unique(obj.outputLog.targetPos(relIdx)))>1&&length(unique(obj.outputLog.movCorrect(relIdx)))>1
+                            if obj.isDebugging
+                                obj.trialClassifier.clsfr=fitcsvm([MIscore1(relIdx)+randn(size(MIscore1(relIdx)))/100,MIscore2(relIdx)+randn(size(MIscore2(relIdx)))/100],obj.outputLog.targetPos(relIdx),'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+                            else
+%                                                             obj.trialClassifier.clsfr=fitNaiveBayes([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2);
+                                obj.trialClassifier.clsfr=fitcsvm([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx),'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+%                                 obj.trialClassifier.clsfr=fitcdiscr([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx));
+                            end
+                            [obj.trialClassifier.clsfr,scoreTransform]=obj.trialClassifier.clsfr.fitPosterior;
+                            if strcmp(scoreTransform.Type,'sigmoid')
+                                A=scoreTransform.Slope;
+                                B=scoreTransform.Intercept;
+                                obj.trialClassifier.scoreTransform=@(x)1./(1+exp(A*x+B));
+                                obj.trialClassifier.clsfr.ScoreTransform='none';
+                            end
                         end
-                        obj.trialClassifier.clsfr=obj.trialClassifier.clsfr.fitPosterior;
                     end
                 end
             catch ME
@@ -617,7 +721,21 @@ classdef TLIinterface < handle
                 keyboard;
             end
         end
-                
+        
+        function updateMIanimation(obj,~,~)
+            % Move selection dots towards targets, after making them
+            % visible
+            timeSinceMIstart=obj.currTime-obj.outputLog.iterationTimes(end);
+            pTimeElapsed=timeSinceMIstart/obj.timingParams.MIlength;
+            if pTimeElapsed<=1
+                set(obj.figureParams.selectionDot(:),'Visible','on');
+                set(obj.figureParams.selectionDot(1),'XData',obj.screenRes(1)/2+obj.screenRes(1)*.2*pTimeElapsed+obj.figureParams.selDotsX);
+                set(obj.figureParams.selectionDot(2),'XData',obj.screenRes(1)/2-obj.screenRes(1)*.2*pTimeElapsed+obj.figureParams.selDotsX);
+                fprintf(obj.motorSerialPort,'e12\n');
+                fprintf(obj.motorSerialPort,sprintf('r%d\n',round(pTimeElapsed*60)));
+            end
+        end
+
         function intercomHandling(obj,~,~)
             try
                 % Recover incoming data. Stop execution if no data is present
@@ -760,36 +878,6 @@ classdef TLIinterface < handle
                 obj.outputLog.(currEventName)=obj.currTime;
             end
         end
-                
-        %% Analysis functions
-%         function BAcc=testClassifier(obj)
-%             % Compute Riemann-mean on data
-%             localRS=riemannSpace(obj.outputLog.relData);
-%             
-%             % Project both train and test data to tangent space
-%             s=TSclassifier.projectData(obj.outputLog.relData,localRS);
-%             
-%             % Perform PCA
-%             proj=s*obj.classifier.coeff;
-%             
-%             % Leave only selected features
-%             proj=proj(:,obj.classifier.featsIdx);
-%             
-%             % Classify test projections
-%             localClassEst=obj.classifier.clsfr.predict(proj);
-%             
-%             % Evaluate results for current partition
-%             BAcc=testAcc(obj.outputLog.targetPos(1:length(localClassEst)),localClassEst);
-%             fprintf('BAcc: %0.2f\n',BAcc);
-%         end
-%         
-%         function crossBAcc=crossValData(obj)
-%             crossBAcc=TSclassifier.crossVal(obj.outputLog.relData,obj.outputLog.targetPos(1:size(obj.outputLog.relData,1)),30);
-%         end
-%         
-%         function onlineBAcc=testOnlineClassifier(obj)
-%             onlineBAcc=testAcc(obj.outputLog.targetPos(~isnan(obj.outputLog.classEst)),obj.outputLog.classEst(~isnan(obj.outputLog.classEst)));
-%         end
         
         function plotMI_GAs(obj)
             wndwdData=obj.outputLog.relData.*repmat(blackman(size(obj.outputLog.relData,2))',size(obj.outputLog.relData,1),1,size(obj.outputLog.relData,3));
@@ -808,16 +896,36 @@ classdef TLIinterface < handle
         end
         
         function plotGAs(obj)
-            t=linspace(0,size(obj.outputLog.relData,2)/obj.fs,size(obj.outputLog.relData,2));
-            lbls=obj.outputLog.targetPos;
-            lbls=lbls(1:size(obj.outputLog.relData,1));
+            t=linspace(0,size(obj.outputLog.errPdata,2)/obj.fs,size(obj.outputLog.errPdata,2));
+            lbls=obj.outputLog.movCorrect;
+            lbls=lbls(1:size(obj.outputLog.errPdata,1));
             for currCh=1:16
+                errSig=squeeze(median(obj.outputLog.errPdata(lbls==0,:,currCh)));
+                corrSig=squeeze(median(obj.outputLog.errPdata(lbls==1,:,currCh)));
                 subplot(4,4,currCh);
-                plot(t,squeeze(obj.outputLog.relData(:,:,currCh))','b');
+                plot(t,errSig,'r');
                 hold on;
-                plot(t,squeeze(mean(obj.outputLog.relData(lbls==0,:,currCh))),'r');
-                plot(t,squeeze(mean(obj.outputLog.relData(lbls==1,:,currCh))),'g');
+                plot(t,corrSig,'k');
+                plot(t,errSig-corrSig,'g','LineWidth',2);
             end
+        end
+        
+        function plotTrialData(obj)
+            actualMove=obj.outputLog.movDirection;
+            MIscore2=obj.outputLog.errPscore;
+            MIscore2(actualMove==1)=-MIscore2(actualMove==1);
+            MIscore1=obj.outputLog.MIscore;
+            MIlbls=obj.outputLog.targetPos(1:length(MIscore2));
+            outlrsBlnk=@(x)x.*(abs(x)<7*mad(x,1));
+            MIscore1=outlrsBlnk(MIscore1);
+            MIscore2=outlrsBlnk(MIscore2);
+            relIdx=MIscore1~=0.*MIscore2~=0;
+            MIscore1=MIscore1(relIdx);
+            MIscore2=MIscore2(relIdx);
+            MIlbls=MIlbls(relIdx);
+            scatter(MIscore1(MIlbls==1),MIscore2(MIlbls==1),'k')
+            hold on
+            scatter(MIscore1(MIlbls==2),MIscore2(MIlbls==2),'g')
         end
         
         %% Dependent properties
@@ -843,15 +951,23 @@ classdef TLIinterface < handle
         end
         
         function md=get.movDirection(obj)
-            if ~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
-                md=sign(obj.trialEst);
+            if ~obj.isCalibrating&&~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
+                md=obj.trialEst;
             else
-                md=sign(obj.MIest);
+                md=obj.MIest;
             end
         end
         
         function mc=get.movCorrect(obj)
-            mc=sign(obj.targetPos-obj.cursorPos)==obj.movDirection;
+            mc=obj.targetPos==obj.movDirection;
+        end
+        
+        function mipt=get.maxItsPerTrial(obj)
+            if obj.isCalibrating
+                mipt=3;
+            else
+                mipt=11;
+            end
         end
     end
     
@@ -918,6 +1034,25 @@ classdef TLIinterface < handle
             
             % Define 'predict' function
             clsfr.predict=@(clsfr,x)TLIinterface.predict(clsfr,x);
+        end
+        
+        function st=generateSelectionTree(varargin)
+            % If not argument is passed a selection tree is generated with
+            % standard alphabet plus digits and basic extra characters
+            if nargin==0
+                entriesList={'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z','0','1','2','3','4','5','6','7','8','9',',','.',':',';','!','?','\_'};
+            else
+                entriesList=varargin{1};
+            end
+            nEntries=length(entriesList);
+            nSplits=ceil(log2(nEntries));
+            st.mat=zeros(nSplits,nEntries);
+            for currLine=1:nSplits
+                st.mat(currLine,:)=(square(linspace(0,2*pi*(1-1/nEntries),nEntries)*2^(currLine-1))<0)+1;
+            end
+            st.entries=entriesList;
+            st.nEntries=nEntries;
+            st.nSplits=nSplits;
         end
     end
 end
