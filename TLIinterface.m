@@ -1,5 +1,6 @@
 classdef TLIinterface < handle
     %% December, 2018 Jacopo Tessadori
+    %% Based on: https://www.frontiersin.org/articles/10.3389/fnins.2017.00251/full
     properties
         portToInterface;
         portFromInterface;
@@ -9,7 +10,8 @@ classdef TLIinterface < handle
         UDPfromET;
         intercomTimer;
         trialEventTimer;
-        MIanimationTimer;
+        EPstretchTimer;
+        EPdataLogger;
         screenRes;
         fileName;
         fs;
@@ -17,32 +19,21 @@ classdef TLIinterface < handle
         listener;
         currTime;
         motorSerialPort;
+        EPparams;
         figureParams;
         targetCharacter;
         targetPos;
-        maxItsPerTrial;
-        currIts;
-        MIdata;
-        MIcov;
-        MIest;
-        MIscore;
-        MIclassifier;
-        errPdata;
-        errPsuperTrialCov;
-        errPest;
-        errPscore;
-        errPclassifier;
-        trialData;
-        trialEst;
-        trialClassifier;
-        trialScore;
-        movDirection;
-        movCorrect;
         finalEst;
         finalLbls;
         selectionTree;
         selLevel;
         phrase;
+        stimType;
+        EPsequence;
+        EPdata;
+        currStim;
+        classifier;
+        stretchScore;
     end
     
     properties (Hidden)
@@ -51,34 +42,19 @@ classdef TLIinterface < handle
         lastDataBlock;
         timingParams;
         isCalibrating=0;
+        isFreeWriting=0;
         retry=0;
-        timeSinceTrialStart=Inf;
-        estimateTimes;
-        isTrialOngoing=0;
         RS;
         colorScheme;
         isDebugging;
-        phantomData=cat(1,reshape(repmat(hann(512),1,16)*randn(16),1,512,16),reshape(repmat(blackman(512),1,16)*randn(16),1,512,16))
-        isTrainingOngoing=0;
-        nTrials=[0,0];
         targetCharacterIdx;
         selHistory=[];
+        stimNext=1;
     end
     
     methods
         %% Constructor
         function obj=TLIinterface(varargin)
-            % Another TLIinterface object may be passed. In this case,
-            % classifiers will be imported from the previous one
-            if nargin==1
-                if isa(varargin{1},'TLIinterface')
-                    obj.errPclassifier=varargin{1}.errPclassifier;
-                    obj.MIclassifier=varargin{1}.MIclassifier;
-                    obj.trialClassifier=varargin{1}.trialClassifier;
-                else
-                    error('First (and only) input must be an instance of the TLIinterface class.');
-                end
-            end
             % Ports from and toward interface
             obj.portFromInterface=8051;
             obj.portToInterface=9000;
@@ -116,19 +92,16 @@ classdef TLIinterface < handle
             if obj.isDebugging
                 fprintf('Warning: running in debug mode\n');
                 obj.timingParams.restLength=.5;
-                obj.timingParams.MIlength=2;
-                obj.timingParams.winLims=[0.5,1.5]; % Beginning and end, in seconds after MI start, of time time window used for training
-                obj.timingParams.winLength=obj.timingParams.winLims(2)-obj.timingParams.winLims(1); % Window length, in seconds, used to perform intention estimation
-                obj.timingParams.FBlength=.25;
                 obj.timingParams.interTrialLength=.25;
             else
                 % Define timing parameters common to experiment and calibration
                 obj.timingParams.restLength=.5;
-                obj.timingParams.MIlength=3;
-                obj.timingParams.winLims=[1.5,3]; % Beginning and end, in seconds after MI start, of time time window used for training
-                obj.timingParams.winLength=obj.timingParams.winLims(2)-obj.timingParams.winLims(1); % Window length, in seconds, used to perform intention estimation
-                obj.timingParams.FBlength=1;
                 obj.timingParams.interTrialLength=.75;
+                obj.EPparams.stimsPerStretch=120;
+                obj.EPparams.stimsPerType=30;
+                obj.EPparams.interStimLength=0.2;
+                obj.EPparams.stimLength=.1;
+                obj.EPparams.stimTypes=3;
             end
                         
             % Determine name to be used to save file upon closing
@@ -142,12 +115,6 @@ classdef TLIinterface < handle
             
             % Perform a countdown to allow amplifier to settle
             obj.startCountdown(30);
-        end
-        
-        function startExperiment(obj)
-            % Initialize devices
-            obj.isCalibrating=0;
-            obj.initialize;
             
             % Define interface object colors
             obj.colorScheme.bg=[.05,.05,.05];
@@ -161,8 +128,6 @@ classdef TLIinterface < handle
             obj.figureParams.squareSide=obj.screenRes(1)/15;
             obj.figureParams.squareVertexX=[-1,1,1,-1]*obj.figureParams.squareSide/2;
             obj.figureParams.squareVertexY=[-1,-1,1,1]*obj.figureParams.squareSide/2;
-            obj.figureParams.selDotsX=cos(linspace(0,2*pi*(1-1/40),40));
-            obj.figureParams.selDotsY=sin(linspace(0,2*pi*(1-1/40),40));
                         
             % Create figure
             obj.figureParams.handle=gcf;
@@ -190,24 +155,18 @@ classdef TLIinterface < handle
             obj.selectionTree=TLIinterface.generateSelectionTree;
             
             % Generate text objects
-            obj.figureParams.currentPhrase=text(obj.screenRes(1)*.5,obj.screenRes(2)*.3,'','Color',obj.colorScheme.textColor,'FontSize',24,'HorizontalAlignment','Center');
-            obj.figureParams.letters(1)=text(obj.screenRes(1)*.3,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
-            obj.figureParams.letters(2)=text(obj.screenRes(1)*.7,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
+            obj.figureParams.currentPhrase=text(obj.screenRes(1)*.5,obj.screenRes(2)*.3,'','Color',obj.colorScheme.textColor,'FontSize',48,'HorizontalAlignment','Center');
+            obj.figureParams.letters(1)=text(obj.screenRes(1)*.3,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',48,'HorizontalAlignment','Center');
+            obj.figureParams.letters(2)=text(obj.screenRes(1)*.7,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',48,'HorizontalAlignment','Center');
             
             % Add cursor square
             obj.figureParams.cursorHandle=patch(obj.screenRes(1)/2+obj.figureParams.squareVertexX,obj.screenRes(2)/2+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-            
-            % Add selection dots
-            obj.figureParams.selectionDot(1)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off');
-            obj.figureParams.selectionDot(2)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off');
-            
-            % Begin actual calibration
-            obj.beginSelection;
         end
-        
+                
         function closeActivity(obj)
             % Stop running timer
             stop(obj.trialEventTimer);
+            pause(1);
             
             % Stop band vibration
             if isvalid(obj.motorSerialPort)
@@ -226,102 +185,54 @@ classdef TLIinterface < handle
                 delete(obj.motorSerialPort);
             end
             
+            % Close figure
+            delete(gcf);
+            
             % Stop Simulink model
             obj.listener=[];
             set_param(obj.modelName,'SimulationCommand','Stop');
             set_param(obj.modelName,'StartFcn','');
         end
-        
-        function stopExperiment(obj)
-            % Close required executables, in case they are still open
-            %             !taskkill -f -im GazeTrackEyeXGazeStream.exe
-            !taskkill -f -im TLIinterface.exe
-            
-            % Release occupied ports
-            obj.UDPfromInterface.release;
-            obj.UDPfromET.release;
-            
-            % Stop and delete timer objects
-            obj.intercomTimer.stop;
-            delete(obj.intercomTimer);
-            obj.intercomTimer=[];
-            
-            obj.closeActivity
-        end
-        
+                
         function startCalibration(obj)
             % Initialize devices
             obj.isCalibrating=1;
             obj.initialize;
-            
-            % Define interface object colors
-            obj.colorScheme.bg=[.05,.05,.05];
-            obj.colorScheme.textColor=[0,.4,0];
-            obj.colorScheme.edgeColor=[.4,.4,.4];
-            obj.colorScheme.targetColor=[.4,0,.1];
-            obj.colorScheme.cursorColorMI=[0,.4,0];
-            obj.colorScheme.cursorColorRest=[.6,.6,0];
-            
-            % Define cursor square
-            obj.figureParams.squareSide=obj.screenRes(1)/15;
-            obj.figureParams.squareVertexX=[-1,1,1,-1]*obj.figureParams.squareSide/2;
-            obj.figureParams.squareVertexY=[-1,-1,1,1]*obj.figureParams.squareSide/2;
-            obj.figureParams.selDotsX=cos(linspace(0,2*pi*(1-1/40),40))*obj.figureParams.squareSide/4;
-            obj.figureParams.selDotsY=sin(linspace(0,2*pi*(1-1/40),40))*obj.figureParams.squareSide/4;
-                        
-            % Create figure
-            obj.figureParams.handle=gcf;
-            set(obj.figureParams.handle,'Tag',mfilename,...
-                'Toolbar','none',...
-                'MenuBar','none',...
-                'Units','pixels',...
-                'Resize','off',...
-                'NumberTitle','off',...
-                'Name','',...
-                'Color',obj.colorScheme.bg,...
-                'RendererMode','Manual',...
-                'Renderer','OpenGL',...
-                'WindowKeyPressFcn',@obj.KeyPressed,...
-                'WindowButtonMotionFcn',@TLIinterface.onMouseMove);
-
-            % Resize figure, then remove figure axis
-            Pix_SS = get(0,'screensize');
-            set(gcf,'position',Pix_SS);
-            axis([0 Pix_SS(3) 0 Pix_SS(4)])
-            set(gca,'YDir','reverse');
-            axis('off')
-            
-            % Generate standard selection tree
-            obj.selectionTree=TLIinterface.generateSelectionTree;
-            
-            % Generate text objects
-            obj.figureParams.currentPhrase=text(obj.screenRes(1)*.5,obj.screenRes(2)*.3,'','Color',obj.colorScheme.textColor,'FontSize',24,'HorizontalAlignment','Center');
-            obj.figureParams.letters(1)=text(obj.screenRes(1)*.3,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
-            obj.figureParams.letters(2)=text(obj.screenRes(1)*.7,obj.screenRes(2)*.5,'','Color',obj.colorScheme.textColor,'FontSize',24);
-            
-            % Add cursor square
-            obj.figureParams.cursorHandle=patch(obj.screenRes(1)/2+obj.figureParams.squareVertexX,obj.screenRes(2)/2+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-            
-            % Add selection dots
-            obj.figureParams.selectionDot(1)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off','EdgeColor',obj.colorScheme.edgeColor);
-            obj.figureParams.selectionDot(2)=patch(obj.screenRes(1)/2+obj.figureParams.selDotsX,obj.screenRes(2)/2+obj.figureParams.selDotsY,obj.colorScheme.edgeColor,'Visible','off','EdgeColor',obj.colorScheme.edgeColor);
             
             % Begin actual calibration
             obj.beginSelection;
         end
          
         function stopCalibration(obj)
-            % Close figure
-            delete(gcf);
-            
             obj.closeActivity;
+        end
+        
+        function startExperiment(obj)
+            % Assuming here that experiment is started on a training
+            % session recording
+            obj.isFreeWriting=1;
+            obj.startTesting;
+        end
+        
+        function startTesting(obj)
+            % Assuming here that experiment is started on a training
+            % session recording
+            obj.isCalibrating=0;
+            obj.trainOfflineClassifier;
+            obj.outputLog=[];
+            obj.phrase=[];
+            obj.initialize;
+            
+            % Begin actual experiment
+            obj.beginSelection;
         end
         
         function beginSelection(obj)
             try                
-                if obj.isCalibrating
-                    % Decide new target caharacter
+                if ~obj.isFreeWriting
+                    % Decide new target character
                     obj.targetCharacterIdx=ceil(rand*length(obj.selectionTree.entries));
+%                     obj.targetCharacterIdx=1;
                     obj.targetCharacter=obj.selectionTree.entries(obj.targetCharacterIdx);
                     
                     % Log data
@@ -342,7 +253,7 @@ classdef TLIinterface < handle
                 
         function beginTrial(obj,~,~)
             try 
-                if obj.isCalibrating
+                if ~obj.isFreeWriting
                     % Highlight background of correct choice
                     obj.targetPos=obj.selectionTree.mat(obj.selLevel,obj.targetCharacterIdx);
                     set(obj.figureParams.letters(:),'EdgeColor',obj.colorScheme.bg);
@@ -361,11 +272,15 @@ classdef TLIinterface < handle
                         return;
                     end
                 end
-                set(obj.figureParams.letters(1),'String',obj.selectionTree.entries(tempMat(obj.selLevel,:)==1),'BackgroundColor',obj.colorScheme.bg);
-                set(obj.figureParams.letters(2),'String',obj.selectionTree.entries(tempMat(obj.selLevel,:)==2),'BackgroundColor',obj.colorScheme.bg);
-                                                
-                % Reset number of iterations
-                obj.currIts=0;
+                s1=obj.selectionTree.entries(tempMat(obj.selLevel,:)==1);
+                s2=obj.selectionTree.entries(tempMat(obj.selLevel,:)==2);
+                if max(length(s1),length(s2))<=5
+                    set(obj.figureParams.letters(1),'String',s1,'BackgroundColor',obj.colorScheme.bg);
+                    set(obj.figureParams.letters(2),'String',s2,'BackgroundColor',obj.colorScheme.bg);
+                else
+                    set(obj.figureParams.letters(1),'String',sprintf('%s...%s',s1{1},s1{end}),'BackgroundColor',obj.colorScheme.bg);
+                    set(obj.figureParams.letters(2),'String',sprintf('%s...%s',s2{1},s2{end}),'BackgroundColor',obj.colorScheme.bg);
+                end
                 
                 % Start timer for next event
                 obj.trialEventTimer=timer;
@@ -384,21 +299,25 @@ classdef TLIinterface < handle
         function performIteration(obj,~,~)
             try
                 % Update iteration counter, change cursor color to signal
-                % beginning of MI task and start timer for new event
-                obj.currIts=obj.currIts+1;
-                obj.logEntry({'selLevel','currIts','targetPos'});
+                % beginning of EP stretch, generate sequence of stimuli
+                obj.logEntry({'selLevel','targetPos'});
                 set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI);
-                obj.trialEventTimer=timer;
-                obj.trialEventTimer.StartDelay=obj.timingParams.MIlength;
-                obj.trialEventTimer.TimerFcn=@obj.provideFeedback;
-                start(obj.trialEventTimer);
+                obj.EPsequence=zeros(obj.EPparams.stimsPerStretch,1);
+                stimIdx=randperm(obj.EPparams.stimsPerStretch);
+                obj.EPsequence(stimIdx(1:obj.EPparams.stimsPerType))=1;
+                switch obj.EPparams.stimTypes
+                    case 2
+                        obj.EPsequence=obj.EPsequence+1;
+                    case 3
+                        obj.EPsequence(stimIdx(obj.EPparams.stimsPerType+1:2*obj.EPparams.stimsPerType))=2;
+                end
+                obj.currStim=1;
                 
-                % Start timer for MI animation
-                obj.MIanimationTimer=timer;
-                obj.MIanimationTimer.TimerFcn=@obj.updateMIanimation;
-                obj.MIanimationTimer.ExecutionMode='fixedRate';
-                obj.MIanimationTimer.Period=.05;
-                start(obj.MIanimationTimer);
+                % Start timer for EP stretch
+                obj.trialEventTimer=timer;
+                obj.trialEventTimer.TimerFcn=@obj.updateEPstretch;
+                obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
+                start(obj.trialEventTimer);
                 
                 % Log trial data
                 obj.logTime('iterationTimes');
@@ -408,136 +327,105 @@ classdef TLIinterface < handle
             end
         end
         
-        function provideFeedback(obj,~,~)
+        function updateEPstretch(obj,~,~)
             try
-                % Recover relevant data to perform MI classification and
-                % log it
-                obj.MIdata=squeeze(obj.lastDataBlock(:,obj.timingParams.winLims(1)*obj.fs+1:obj.timingParams.winLims(2)*obj.fs,:));
-                % If debugging, substitute actual data with phantom
-                % data
-                if obj.isDebugging
-                    errChance=0.2;
-                    dataSel=xor(rand<errChance,obj.targetPos>1);
-                    obj.MIdata=squeeze(obj.phantomData(dataSel+1,:,:))+randn(512,16)/100;
-                end
-                obj.logEntry({'MIdata'});
-                
-                % Perform MI classification
-                obj.classifyData('MI');
-                
-                % Provide feedback by changing expected destination target
-                % to selection result
-                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
-                set(obj.figureParams.letters(obj.movDirection),'BackgroundColor',obj.colorScheme.cursorColorRest);
-                obj.logEntry({'movDirection','movCorrect'});
-                
-                % Start timer for new event
+                % Generate new timer event, then either deliver stim or stop
+                % it. If all stims have been delivered, move on to next phase
                 obj.trialEventTimer=timer;
-                obj.trialEventTimer.StartDelay=obj.timingParams.FBlength;
-                obj.trialEventTimer.TimerFcn=@obj.evaluateFeedback;
-                start(obj.trialEventTimer);
-                
-                % Log trial data
-                obj.logTime('feedbackStartTimes');
-                                
-                % Provide tactile feedback
-                stop(obj.MIanimationTimer);
-                switch obj.movDirection
-                    case 1
-                        fprintf(obj.motorSerialPort,'e8\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'r120\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'e4\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'r0\n');
-                    case 2
-                        fprintf(obj.motorSerialPort,'e4\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'r120\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'e8\n');
-                        pause(0.05);
-                        fprintf(obj.motorSerialPort,'r0\n');
-                end
-            catch ME
-                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
-                keyboard;
-            end
-        end
-                        
-        function evaluateFeedback(obj,~,~)
-            try
-                % Recover relevant data to perform errP classification and
-                % log it
-                obj.errPdata=squeeze(obj.lastDataBlock(1,end-(obj.timingParams.FBlength*obj.fs)+1:end,:));
-                % If debugging, substitute actual data with phantom
-                % data
-                if obj.isDebugging
-                    obj.errPdata=squeeze(obj.phantomData((obj.targetPos==(obj.movDirection+2))+1,1:floor(obj.timingParams.FBlength*obj.fs),:))+randn(floor(obj.timingParams.FBlength*obj.fs),16)/100;
-                end
-                obj.logEntry({'errPdata'});
-                
-                % Stop feedback animation and VT feedback
-                set(obj.figureParams.selectionDot(:),'Visible','off');
-                fprintf(obj.motorSerialPort,'e12\n');
-                fprintf(obj.motorSerialPort,'r0\n');
-                
-                % If calibrating, log number of correct and erroneous
-                % movements
-                if obj.isCalibrating
-                    obj.nTrials(obj.movCorrect+1)=sum(obj.outputLog.movCorrect==obj.movCorrect);
-                end
-                
-                % Perform errP classification
-                obj.classifyData('errP');
-                
-                % Trial data is given by scores of estimation according to
-                % both classifiers. Perform trial prediction and log it
-                obj.trialData=[obj.MIscore;obj.errPscore*sign(obj.movDirection-1.5)];
-                obj.classifyData('trial');
-                obj.logEntry({'trialData'});
-                
-                % Remove feedback
-                set(obj.figureParams.letters(:),'BackgroundColor',obj.colorScheme.bg);
-                
-                % Decider whether to start new trial or new iteration, then
-                % set timer for new event
-                obj.trialEventTimer=timer;
-                obj.trialEventTimer.StartDelay=obj.timingParams.restLength;
-                if isempty(obj.trialClassifier)||~isfield(obj.trialClassifier,'scoreTransform')
-                    trialEndCondition=1;
+                obj.trialEventTimer.TimerFcn=@obj.updateEPstretch;
+                if obj.stimNext
+                    if obj.currStim<=length(obj.EPsequence)
+                        obj.stimType=obj.EPsequence(obj.currStim);
+                    else
+                        r=rand;
+                        obj.stimType=(r<0.125)+(r<0.25);
+                    end
+                    stimStrength=120;
+                    switch obj.stimType
+                        case 0
+                            fprintf(obj.motorSerialPort,'e2\n');
+                        case 1
+                            fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos~=1)*4));
+                        case 2
+                            fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos==1)*4));
+                    end
+                    pause(0.05);
+                    fprintf(obj.motorSerialPort,sprintf('r%d\n',stimStrength));
+                    obj.logEntry({'stimType'});
+                    obj.logTime('stimStart');
+                    obj.stimNext=0;
+                    obj.currStim=obj.currStim+1;
+                    obj.trialEventTimer.StartDelay=obj.EPparams.stimLength;
+                    
+%                     % Start timer to log data
+%                     obj.EPdataLogger=timer;
+%                     obj.EPdataLogger.TimerFcn=@obj.logEPdata;
+%                     obj.EPdataLogger.StartDelay=0.8;
+%                     start(obj.EPdataLogger);
                 else
-                    relIdx=max(length(obj.outputLog.currIts)-obj.currIts+1,1):length(obj.outputLog.currIts);
-                    trialEndCondition=obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))>.8||obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))<.2;
-                end
-                if ~trialEndCondition&&obj.currIts<obj.maxItsPerTrial
-                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI,'EdgeColor',obj.colorScheme.bg);
-                    obj.trialEventTimer.TimerFcn=@obj.performIteration;
-                else
-                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorRest,'EdgeColor',obj.colorScheme.bg);
-                    obj.trialEventTimer.TimerFcn=@obj.endTrial;
+                    % Stop tactile stimulation
+                    obj.stimNext=1;
+                    fprintf(obj.motorSerialPort,'e14\n');
+                    pause(0.05);
+                    fprintf(obj.motorSerialPort,'r0\n');
+                    if obj.currStim>length(obj.EPsequence)
+                        if obj.isCalibrating
+                            obj.trialEventTimer.TimerFcn=@obj.endTrial;
+                        elseif obj.stimType>0
+                            % Recover relevant stimuli delivered since last
+                            % trial start, average them, then provide a
+                            % prediction
+                            stimSinceTrialStartIdx=obj.outputLog.stimStart>obj.outputLog.iterationTimes(end);
+                            cl1median=median(obj.outputLog.EPdata(logical(stimSinceTrialStartIdx.*(obj.outputLog.stimType==1)),:,:));
+                            cl2median=median(obj.outputLog.EPdata(logical(stimSinceTrialStartIdx.*(obj.outputLog.stimType==2)),:,:));
+                            [trialEst,trialScore]=TSclassifier.timePredict(obj.classifier,cat(1,cl1median,cl2median));
+                            obj.stretchScore=diff(real(trialScore));
+                            obj.logEntry({'stretchScore'});
+                            obj.logTime('scoreEstTimes');
+                            fprintf('%d - %d\n',sum(stimSinceTrialStartIdx.*(obj.outputLog.stimType==1)),sum(stimSinceTrialStartIdx.*(obj.outputLog.stimType==2)));
+                            fprintf('%0.2f\n',diff(real(trialScore)));
+                            fprintf('%0.2f\n',obj.classifier.scoreProbModel(sum(obj.outputLog.stretchScore(obj.outputLog.scoreEstTimes>obj.outputLog.iterationTimes(end)))));
+                            if abs(.5-obj.classifier.scoreProbModel(sum(obj.outputLog.stretchScore(obj.outputLog.scoreEstTimes>obj.outputLog.iterationTimes(end)))))>.4
+                                obj.finalEst=trialEst(1);
+                                obj.trialEventTimer.TimerFcn=@obj.endTrial;
+                            end
+                        end
+                    end
+                    obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
                 end
                 start(obj.trialEventTimer);
-                
-                % Log trial data
-                obj.logTime('feedbackEvalTimes');
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
             end
         end
         
+        function logEPdata(obj,~,~)
+            % Log time data around last stim
+            obj.EPdata=obj.lastDataBlock(1,end-obj.fs+1:end,:);
+            obj.logEntry({'EPdata'});
+        end
+                                        
         function endTrial(obj,~,~)
             try
-                % Make decision on last trial estimations
-%                 obj.finalEst=mode(obj.outputLog.trialEst(max(1,end-obj.currIts+1):end));
-                obj.finalEst=(median(obj.outputLog.trialScore(max(1,end-obj.currIts+1):end))<0)+1;
-                if obj.isCalibrating
+                % If not free writing, log labels
+                if ~obj.isFreeWriting
                     obj.finalLbls=obj.targetPos;
                     obj.logEntry({'finalLbls'});
                 end
-                obj.logEntry({'finalEst'});
+                if obj.isCalibrating
+                    % If calibrating, actual label does not count
+                    obj.finalEst=obj.targetPos;
+                    obj.logEntry({'finalEst'});
+                elseif ~obj.isFreeWriting
+                    % If in testing mode, log estimation, then overwrite it
+                    % with correct choice
+                    obj.logEntry({'finalEst'});
+                    obj.finalEst=obj.targetPos;
+                else
+                    % In free writing mode, log estimation and deal with it
+                    obj.logEntry({'finalEst'});
+                end
                 
                 % Update selection history so far
                 obj.selHistory=cat(1,obj.selHistory,obj.finalEst);
@@ -550,15 +438,14 @@ classdef TLIinterface < handle
                 set(obj.figureParams.letters(obj.targetPos),'EdgeColor',obj.colorScheme.bg);
                 drawnow;
                 
-                % If accuracy is high enough for trial classifier, close
-                % calibration
-                if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=400
-                    fprintf('Target accuracy reached, shutting down.\n');
-                    obj.stopCalibration;
-                    return;
-                else
-                    fprintf('%d/400\n',length(obj.outputLog.movCorrect));
-                end
+%                 % If large enough number of iterations have occurred
+%                 if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=400
+%                     fprintf('Target accuracy reached, shutting down.\n');
+%                     obj.stopCalibration;
+%                     return;
+%                 else
+%                     fprintf('%d/400\n',length(obj.outputLog.movCorrect));
+%                 end
                 
                 % Update selection counter. If last level is reached, end
                 % current selection
@@ -573,12 +460,6 @@ classdef TLIinterface < handle
                 
                 % Wait before starting new trial
                 start(obj.trialEventTimer);
-                
-                % Update classifiers with new data, if calibration is
-                % ongoing
-                if obj.isCalibrating
-                    obj.updateClassifiers;
-                end
                 
                 % Log trial data
                 obj.logTime('trialEndTimes');
@@ -601,141 +482,7 @@ classdef TLIinterface < handle
                 keyboard;
             end
         end
-        
-        function classifyData(obj,dataType)
-            switch dataType
-                case 'MI'
-                    % Compute and store covariance matrix of current data
-                    obj.MIcov=cov(obj.MIdata);
-                    
-                    % Perform prediction, if a classifier is available
-                    if isempty(obj.MIclassifier)
-                        obj.MIest=(rand>.5)+1;
-                        obj.MIscore=0;
-                    else
-                        [obj.MIest,obj.MIscore]=obj.MIclassifier.predict(obj.MIclassifier,obj.MIcov);
-                    end
-                    obj.logEntry({'MIcov','MIest','MIscore'});
-                case 'errP'
-                    % Perform prediction
-                    if ~isfield(obj.errPclassifier,'predict')
-                        obj.errPest=round(rand);
-                        obj.errPscore=0;
-                    else
-                        % Compute and store super-trials covariance matrices
-                        superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',obj.errPdata);
-                        obj.errPsuperTrialCov=cov(superTrial);
-                        [obj.errPest,obj.errPscore]=obj.errPclassifier.predict(obj.errPclassifier,obj.errPsuperTrialCov);
-                    end
-                    obj.logEntry({'errPsuperTrialCov','errPest','errPscore'});
-                case 'trial'
-                    % Perform prediction
-                    if isempty(obj.trialClassifier)
-                        obj.trialEst=mode(obj.outputLog.MIest(max(end-obj.maxItsPerTrial+1,1):end));
-                        obj.trialScore=0;
-                    else
-                        [obj.trialEst,obj.trialScore]=obj.trialClassifier.clsfr.predict(obj.trialData');
-                        obj.trialScore=obj.trialScore(1);
-                    end
-                    obj.logEntry({'trialEst','trialScore'});
-            end
-        end
-
-        function updateClassifiers(obj)
-            try
-                % Cannot train classifiers until at least one trial per
-                % class has been observed.
-                if min(obj.nTrials)>1&&length(unique(obj.outputLog.targetPos))>1
-                    
-                    %% MI classifier
-                    obj.MIclassifier=TLIinterface.trainClassifier(obj.MIclassifier,obj.outputLog.MIcov,obj.outputLog.targetPos);
-                    
-                    %% errP classifier
-                    % Compute class means
-                    obj.errPclassifier.classMeans(1,:,:)=median(obj.outputLog.errPdata(obj.outputLog.movCorrect==0,:,:));
-                    obj.errPclassifier.classMeans(2,:,:)=median(obj.outputLog.errPdata(obj.outputLog.movCorrect==1,:,:));
-                    
-                    % If this is first time training classifiers, I need to
-                    % update previous superTrials
-                    if ~obj.isTrainingOngoing
-                        % Update past super-trials covariance matrices with
-                        % avaiable class means
-                        obj.outputLog.errPsuperTrialCov=zeros(length(obj.outputLog.targetPos),3*size(obj.errPclassifier.classMeans,3),3*size(obj.errPclassifier.classMeans,3));
-                        for currTrial=1:length(obj.outputLog.targetPos)
-                            superTrial=cat(2,reshape(permute(obj.errPclassifier.classMeans,[1,3,2]),[],size(obj.errPdata,1))',squeeze(obj.outputLog.errPdata(currTrial,:,:)));
-                            obj.outputLog.errPsuperTrialCov(currTrial,:,:)=cov(superTrial);
-                        end
-                    
-                        obj.isTrainingOngoing=1;    
-                    end
-                    
-                    % Train classifier
-                    obj.errPclassifier=TLIinterface.trainClassifier(obj.errPclassifier,obj.outputLog.errPsuperTrialCov,obj.outputLog.movCorrect);
-                    
-                    % Cannot train trial classifier until at least two
-                    % predictions per class have been performed
-                    nMIests=zeros(2,1);
-                    nErrPests=zeros(2,1);
-                    for currClass=1:2
-                        relIdx=obj.outputLog.targetPos==currClass;
-                        nMIests(currClass)=sum(obj.outputLog.MIscore(relIdx)~=0);
-                    end
-                    for currClass=1:2
-                        relIdx=obj.outputLog.movCorrect==currClass-1;
-                        nErrPests(currClass)=sum(obj.outputLog.errPscore(relIdx)~=0);
-                    end
-                    
-                    if all(nMIests)~=0&&all(nErrPests)~=0
-                        %% Trial classifier
-                        actualMove=obj.outputLog.movDirection;
-                        MIscore1=obj.outputLog.MIscore;
-                        MIscore2=obj.outputLog.errPscore;
-                        MIscore2(actualMove==1)=-MIscore2(actualMove==1);
-                        % First estimations are bound to result in
-                        % abnormally large score values: blank outliers
-                        outlrsBlnk=@(x)x.*(abs(x)<7*mad(x,1));
-                        MIscore1=outlrsBlnk(MIscore1);
-                        MIscore2=outlrsBlnk(MIscore2);
-                        relIdx=(MIscore2~=0)&(obj.outputLog.MIscore~=0);
-                        if sum(relIdx)>2&&length(unique(obj.outputLog.targetPos(relIdx)))>1&&length(unique(obj.outputLog.movCorrect(relIdx)))>1
-                            if obj.isDebugging
-                                obj.trialClassifier.clsfr=fitcsvm([MIscore1(relIdx)+randn(size(MIscore1(relIdx)))/100,MIscore2(relIdx)+randn(size(MIscore2(relIdx)))/100],obj.outputLog.targetPos(relIdx),'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
-                            else
-%                                                             obj.trialClassifier.clsfr=fitNaiveBayes([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx)-2);
-                                obj.trialClassifier.clsfr=fitcsvm([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx),'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
-%                                 obj.trialClassifier.clsfr=fitcdiscr([MIscore1(relIdx),MIscore2(relIdx)],obj.outputLog.targetPos(relIdx));
-                            end
-                            [obj.trialClassifier.clsfr,scoreTransform]=obj.trialClassifier.clsfr.fitPosterior;
-                            if strcmp(scoreTransform.Type,'sigmoid')
-                                A=scoreTransform.Slope;
-                                B=scoreTransform.Intercept;
-                                obj.trialClassifier.scoreTransform=@(x)1./(1+exp(A*x+B));
-                                obj.trialClassifier.clsfr.ScoreTransform='none';
-                            end
-                        end
-                    end
-                end
-            catch ME
-                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
-                stop(obj.trialEventTimer);
-                keyboard;
-            end
-        end
-        
-        function updateMIanimation(obj,~,~)
-            % Move selection dots towards targets, after making them
-            % visible
-            timeSinceMIstart=obj.currTime-obj.outputLog.iterationTimes(end);
-            pTimeElapsed=timeSinceMIstart/obj.timingParams.MIlength;
-            if pTimeElapsed<=1
-                set(obj.figureParams.selectionDot(:),'Visible','on');
-                set(obj.figureParams.selectionDot(1),'XData',obj.screenRes(1)/2+obj.screenRes(1)*.2*pTimeElapsed+obj.figureParams.selDotsX);
-                set(obj.figureParams.selectionDot(2),'XData',obj.screenRes(1)/2-obj.screenRes(1)*.2*pTimeElapsed+obj.figureParams.selDotsX);
-                fprintf(obj.motorSerialPort,'e12\n');
-                fprintf(obj.motorSerialPort,sprintf('r%d\n',round(pTimeElapsed*60)));
-            end
-        end
-
+                
         function intercomHandling(obj,~,~)
             try
                 % Recover incoming data. Stop execution if no data is present
@@ -789,11 +536,9 @@ classdef TLIinterface < handle
                 pause(1);
                 fprintf(obj.motorSerialPort,'e4\n');
                 pause(0.3);
-                fprintf(obj.motorSerialPort,'p\n');
-                pause(0.3);
                 fprintf(obj.motorSerialPort,'e8\n');
                 pause(0.3);
-                fprintf(obj.motorSerialPort,'p\n');
+                fprintf(obj.motorSerialPort,'e2\n');
                 pause(0.3);
             catch
                 warning('Unable to open serial port communication with band motors');
@@ -879,55 +624,235 @@ classdef TLIinterface < handle
             end
         end
         
-        function plotMI_GAs(obj)
-            wndwdData=obj.outputLog.relData.*repmat(blackman(size(obj.outputLog.relData,2))',size(obj.outputLog.relData,1),1,size(obj.outputLog.relData,3));
-            fftData=abs(fft(wndwdData,[],2));
-            f=linspace(0,obj.fs,size(fftData,2));
-            lbls=obj.outputLog.targetPos;
-            lbls=lbls(1:size(fftData,1));
-            for currCh=1:16
-                subplot(4,4,currCh);
-                loglog(f,squeeze(fftData(:,:,currCh))','b');
-                hold on;
-                loglog(f,squeeze(mean(fftData(lbls==0,:,currCh))),'r');
-                loglog(f,squeeze(mean(fftData(lbls==1,:,currCh))),'g');
-                set(gca,'XLim',[8,30]);
+        %% Plotting and analysis functions
+        
+        function [lbls,data]=averageEPs(obj)
+            % Frequency filters data
+            normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+            [B,A]=cheby1(2,6,[.1,10]/(obj.fs/2));
+%             fltrdData=filter(B,A,obj.outputLog.rawData);
+            fltrdData=normalize(filter(B,A,obj.outputLog.rawData));
+            fltrdData=resample(fltrdData,20,obj.fs);
+            newFs=20;
+%             newFs=512;
+            fltrdData=TLIinterface.applyLapFilter(fltrdData);
+%             fltrdData=fltrdData-repmat(median(fltrdData,2),1,size(fltrdData,2));
+%             for currCh=1:size(fltrdData,2)
+%                 fltrdData(:,currCh)=fltrdData(:,currCh)-median(fltrdData(:,[1:currCh-1,currCh+1:end]),2);
+%             end
+%             fltrdData=obj.outputLog.rawData;
+            
+            % Recover relevant windows
+            winLims=[-.2,.8];
+            winIdxs=round(winLims*newFs);
+            lbls=obj.outputLog.stimType;
+            data=zeros(length(lbls),winIdxs(2)-winIdxs(1),size(obj.outputLog.rawData,2));
+            for currTrial=1:length(obj.outputLog.stimStart)
+                data(currTrial,:,:)=reshape(fltrdData(round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(1)+1:round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(2),:),1,floor((winLims(2)-winLims(1))*newFs),[]);
+                data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,1:round(-winLims(1)*newFs),:),2),1,size(data,2),1);
             end
+%             data=data(:,round(-winLims(1)*obj.fs)+1:end,:);
+%             lbls=obj.outputLog.stimType(1:size(obj.outputLog.EPdata,1));
+%             classId=unique(lbls);
+%             nClasses=length(classId);
+%             trialMeans=[];
+%             trialLbls=[];
+%             for currTrial=1:floor(length(obj.outputLog.stimType)/obj.EPparams.stimsPerStretch)
+%                 relData=obj.outputLog.EPdata((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch,:,:);
+%                 relLbls=lbls((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch);
+%                 for currClass=1:nClasses
+%                     classData=relData(relLbls==classId(currClass),:,:);
+%                     trialMeans=cat(1,trialMeans,median(classData,1));
+%                     trialLbls=cat(1,trialLbls,classId(currClass));
+%                 end
+%             end
+%             ceLbls=trialLbls(trialLbls>0);
+%             ceMean=trialMeans(trialLbls>0,:,:);
         end
         
+        function [ceLbls,feats]=recoverTrialMoments(obj)
+            % Recover moments in each trial, for each time point and each
+            % class
+            lbls=obj.outputLog.stimType(1:size(obj.outputLog.EPdata,1));
+            classId=unique(lbls);
+            nClasses=length(classId);
+            trialMeans=[];
+            trialSD=[];
+            trialSkew=[];
+            trialLbls=[];
+            trialKurt=[];
+            for currTrial=1:floor(length(obj.outputLog.stimType)/obj.EPparams.stimsPerStretch)
+                relData=obj.outputLog.EPdata((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch,:,:);
+                relDataShort=zeros(size(relData,1),ceil(size(relData,2)/(obj.fs/20)),size(relData,3));
+                for currCh=1:16
+                    relDataShort(:,:,currCh)=resample(squeeze(relData(:,:,currCh)'),20,obj.fs)';
+                end
+                relData=relDataShort;
+                relLbls=lbls((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch);
+                for currClass=1:nClasses
+                    classData=relData(relLbls==classId(currClass),:,:);
+                    trialMeans=cat(1,trialMeans,mean(classData,1));
+                    trialSD=cat(1,trialSD,std(classData,[],1));
+                    trialSkew=cat(1,trialSkew,skewness(classData,[],1));
+                    trialKurt=cat(1,trialKurt,kurtosis(classData,[],1));
+                    trialLbls=cat(1,trialLbls,classId(currClass));
+                end
+            end
+            ceLbls=trialLbls(trialLbls>0);
+            ceMean=trialMeans(trialLbls>0,:,:);
+            ceSD=trialSD(trialLbls>0,:,:);
+            ceSkew=trialSkew(trialLbls>0,:,:);
+            ceKurt=trialKurt(trialLbls>0,:,:);
+            
+            % First four trial still are affected by startup
+            ceLbls=ceLbls(120:end);
+            ceMean=ceMean(120:end,:,:);
+            ceSD=ceSD(120:end,:,:);
+            ceSkew=ceSkew(120:end,:,:);
+            ceKurt=ceKurt(120:end,:,:);
+            
+            % Join moments together and treat them as features for
+            % classifier
+            feats=cat(3,ceMean,ceSD,ceSkew,ceKurt);
+            feats=reshape(feats,size(feats,1),[]);
+        end
+        
+        function [stBAcc,classAcc]=estimateOfflineAcc(obj)
+            [lbls,data]=averageEPs(obj);
+            % Remove first selection, affected by ampl noise, and confounds
+            lbls(1:120)=0;
+            data2=data(lbls>0,:,:);
+            lbls2=lbls(lbls>0);
+            feats=reshape(data2,size(data2,1),[]);
+            
+            p=zeros(size(feats,2),1);
+            for currFeat=1:size(feats,2)
+                p(currFeat)=ranksum(feats(lbls2==1,currFeat),feats(lbls2==2,currFeat));
+            end
+            feats2=feats(:,p<.05);
+%             discr=fitcdiscr(feats2,lbls2,'crossVal','on','KFold',10,'DiscrimType','linear','Gamma',0,'FillCoeffs','off','ClassNames',[1;2]);
+%             discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',1);
+            discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+            stEst=discr.kfoldPredict;
+            stBAcc=testAcc(lbls2,stEst);
+            
+            classEst=zeros(floor(length(lbls2)/60),1);
+            for currTrial=1:floor(length(lbls2)/60)
+                relIdx=(currTrial-1)*60+1:currTrial*60;
+                classEst(currTrial)=mode(double(stEst(relIdx)==lbls2(relIdx)));
+            end
+            classAcc=mean(classEst);
+            fprintf('Single trial BAcc: %0.2f; class acc: %0.2f\n',stBAcc,classAcc);
+            
+%             % Recover data
+%             [lbls,data]=averageEPs(obj);
+%             
+%             % Remove first selection, affected by ampl noise, and confounds
+%             lbls(1:120)=0;
+%             data2=data(lbls>0,:,:);
+%             lbls2=lbls(lbls>0);
+%             
+%             % Perform crossvalidation
+%             BAcc=TSclassifier.crossValTime(data2,lbls2,5);
+%             % Compute correct/erroneous lbls and means over repetitions
+%             % within the same trial
+%             [ceLbls,ceMean]=averageEPs(obj);
+%             
+%             trialEst=zeros(size(ceLbls));
+%             trialScore=zeros(size(ceLbls));
+%             % Perform LOO cross classification
+%             for currTrial=1:length(ceLbls)/2
+%                 trainIdx=[1:(currTrial-1)*2,currTrial*2+1:length(ceLbls)];
+%                 testIdx=(currTrial-1)*2+1:currTrial*2;
+%                 trainData=ceMean(trainIdx,:,:);
+%                 testData=ceMean(testIdx,:,:);
+%                 trainLbls=ceLbls(trainIdx);
+%                 
+%                 % Train classifier
+%                 clsfr=TSclassifier.timeTrain(trainData,trainLbls);
+%                 
+%                 % Compute results
+%                 [trialEst(testIdx),trialScore(testIdx)]=TSclassifier.timePredict(clsfr,testData);
+%             end
+%             fixedTrialEst=zeros(length(ceLbls)/2,1);
+%             for currTrial=1:length(fixedTrialEst)
+%                 fixedTrialEst(currTrial)=trialScore(currTrial*2-1)<trialScore(currTrial*2);
+%             end
+%             acc=mean(fixedTrialEst==1);
+%             fprintf('BAcc: %0.2f\nFixed acc: %0.2f\n',testAcc(ceLbls,trialEst),acc);
+        end
+        
+        function trainOfflineClassifier(obj)
+            % Compute correct/erroneous lbls and means over repetitions
+            % within the same trial
+            [ceLbls,ceMean]=averageEPs(obj);
+            
+            % Train classifier
+            obj.classifier=TSclassifier.timeTrain(ceMean,ceLbls);
+            
+            % Determine score/prob model
+            [~,score]=TSclassifier.timePredict(obj.classifier,ceMean);
+            scoreProbModel=fittype('1/(1+exp(-(a*x+b)))');
+            obj.classifier.scoreProbModel=fit(real(score),ceLbls-1,scoreProbModel,'Robust','on');
+        end
+               
         function plotGAs(obj)
-            t=linspace(0,size(obj.outputLog.errPdata,2)/obj.fs,size(obj.outputLog.errPdata,2));
-            lbls=obj.outputLog.movCorrect;
-            lbls=lbls(1:size(obj.outputLog.errPdata,1));
+            % Recover data
+            [lbls,data]=averageEPs(obj);
+            
+            % Average and plot them
+            winLims=[-.2,.8];
+            t=linspace(winLims(1),winLims(2),size(data,2));
+            tStep=median(diff(t));
             for currCh=1:16
-                errSig=squeeze(median(obj.outputLog.errPdata(lbls==0,:,currCh)));
-                corrSig=squeeze(median(obj.outputLog.errPdata(lbls==1,:,currCh)));
                 subplot(4,4,currCh);
-                plot(t,errSig,'r');
-                hold on;
-                plot(t,corrSig,'k');
-                plot(t,errSig-corrSig,'g','LineWidth',2);
+                hold on
+                clrs='rgk';
+                for currClass=1:3
+                    plot(t,median(data(lbls==currClass-1,:,currCh)),clrs(currClass));
+                    set(gca,'XLim',[winLims(1),winLims(2)]);
+                    for currSample=1:size(data,2)
+%                         p=anova1(squeeze(data(:,currSample,currCh)),lbls,'off');
+                        p=ranksum(squeeze(data(lbls==1,currSample,currCh)),data(lbls==2,currSample,currCh));
+                        if p<.05
+                            patch(t(currSample)+[-.5,.5,.5,-.5]*tStep,reshape([get(gca,'YLim');get(gca,'YLim')],[],1),'yellow','FaceAlpha',.3,'EdgeAlpha',0);
+                        end
+                    end
+                end
             end
+%             % Normalize data, apply CARs
+%             normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+%             CARdata=obj.outputLog.EPdata;
+%             for currTrial=1:size(CARdata,1)
+%                 normData=normalize(squeeze(CARdata(currTrial,:,:)));
+%                 CARdata(currTrial,:,:)=normData-repmat(median(normData,2),1,size(normData,2));
+%             end
+%             
+%             % Plot results
+%             t=linspace(0,size(obj.outputLog.EPdata,2)/obj.fs,size(obj.outputLog.EPdata,2));
+%             lbls=obj.outputLog.stimType(1:size(obj.outputLog.EPdata,1));
+%             classId=unique(lbls);
+%             nClasses=length(classId);
+%             lbls(1:10)=NaN;
+%             clrs='bkgrcmy';
+%             tStep=median(diff(t));
+%             for currCh=1:16
+%                 for currClass=1:nClasses
+%                     sig=squeeze(mean(CARdata(lbls==classId(currClass),:,currCh)));
+%                     subplot(4,4,currCh);
+%                     plot(t,sig,clrs(currClass));
+%                     hold on;
+%                     set(gca,'XLim',[t(1),t(end)]);
+%                     for currSample=1:size(CARdata,2)
+%                         p=anova1(squeeze(CARdata(:,currSample,currCh)),lbls,'off');
+%                         if p<.05
+%                             patch(t(currSample)+[-.5,.5,.5,-.5]*tStep,reshape([get(gca,'YLim');get(gca,'YLim')],[],1),'yellow','FaceAlpha',.3,'EdgeAlpha',0);
+%                         end
+%                     end
+%                 end
+%             end
         end
-        
-        function plotTrialData(obj)
-            actualMove=obj.outputLog.movDirection;
-            MIscore2=obj.outputLog.errPscore;
-            MIscore2(actualMove==1)=-MIscore2(actualMove==1);
-            MIscore1=obj.outputLog.MIscore;
-            MIlbls=obj.outputLog.targetPos(1:length(MIscore2));
-            outlrsBlnk=@(x)x.*(abs(x)<7*mad(x,1));
-            MIscore1=outlrsBlnk(MIscore1);
-            MIscore2=outlrsBlnk(MIscore2);
-            relIdx=MIscore1~=0.*MIscore2~=0;
-            MIscore1=MIscore1(relIdx);
-            MIscore2=MIscore2(relIdx);
-            MIlbls=MIlbls(relIdx);
-            scatter(MIscore1(MIlbls==1),MIscore2(MIlbls==1),'k')
-            hold on
-            scatter(MIscore1(MIlbls==2),MIscore2(MIlbls==2),'g')
-        end
-        
+                
         %% Dependent properties
         function res=get.screenRes(~)
             res=get(0,'screensize');
@@ -940,34 +865,6 @@ classdef TLIinterface < handle
         
         function cTime=get.currTime(obj)
             cTime=get_param(obj.modelName,'SimulationTime');
-        end
-        
-        function tsts=get.timeSinceTrialStart(obj)
-            if ~isempty(obj.outputLog)&&isfield(obj.outputLog,'trialStartTimes')
-                tsts=obj.currTime-obj.outputLog.trialStartTimes(end);
-            else
-                tsts=NaN;
-            end
-        end
-        
-        function md=get.movDirection(obj)
-            if ~obj.isCalibrating&&~isempty(obj.trialEst)&&obj.trialEst~=0&&obj.currIts>1
-                md=obj.trialEst;
-            else
-                md=obj.MIest;
-            end
-        end
-        
-        function mc=get.movCorrect(obj)
-            mc=obj.targetPos==obj.movDirection;
-        end
-        
-        function mipt=get.maxItsPerTrial(obj)
-            if obj.isCalibrating
-                mipt=3;
-            else
-                mipt=11;
-            end
         end
     end
     
@@ -991,56 +888,12 @@ classdef TLIinterface < handle
                 set(gcf,'Pointer','custom');
             end
         end
-        
-        function [est,score]=predict(classifier,currCov)
-            %Project current entry to TS
-            proj=classifier.RS.project(currCov);
-            
-            % Apply PCA
-            proj=proj'*classifier.coeff;
-            
-            % Feature selection
-            proj=proj(:,classifier.featsIdx);
-            
-            % Provide estimation
-            est=classifier.clsfr.predict(proj);
-            
-            % Compute score
-            score=real(proj*classifier.clsfr.Coeffs(2,1).Linear+classifier.clsfr.Coeffs(2,1).Const);
-        end
-        
-        function clsfr=trainClassifier(clsfr,covData,lbls)
-            % Consider only the most recent covariance matrices to
-            % determine centroid
-            clsfr.RS=riemannSpace(covData(max(1,end-20):end,:,:),'cov');
-            
-            % Project data before classification
-            projs=zeros(size(covData,1),size(covData,3)*(size(covData,3)+1)/2);
-            for currTrial=1:size(covData,1)
-                projs(currTrial,:,:)=clsfr.RS.project(squeeze(covData(currTrial,:,:)));
-            end
-            
-            % Perform PCA
-            [clsfr.coeff,projs,latent]=pca(projs);
-            
-            % Perform feature selection
-            clsfr.featsIdx=TSclassifier.selectFeatures(projs,lbls,latent);
-            
-            % Leave only desired features
-            projs=projs(:,clsfr.featsIdx);
-            
-            % Perform training
-            clsfr.clsfr=fitcdiscr(projs,lbls);
-            
-            % Define 'predict' function
-            clsfr.predict=@(clsfr,x)TLIinterface.predict(clsfr,x);
-        end
-        
+                        
         function st=generateSelectionTree(varargin)
             % If not argument is passed a selection tree is generated with
             % standard alphabet plus digits and basic extra characters
             if nargin==0
-                entriesList={'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z','0','1','2','3','4','5','6','7','8','9',',','.',':',';','!','?','\_'};
+                entriesList={'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'};
             else
                 entriesList=varargin{1};
             end
@@ -1053,6 +906,29 @@ classdef TLIinterface < handle
             st.entries=entriesList;
             st.nEntries=nEntries;
             st.nSplits=nSplits;
+        end
+        
+        function [outData,fltrWeights]=applyLapFilter(inData)
+            % Remove pegged channels from recording
+            toBeRemoved=find(median(inData)==max(inData));
+            load('C:\Code\Common\elMap16_new.mat');
+            tempMat=elMap16.elMat;
+            for currCh=1:length(toBeRemoved)
+                tempMat(tempMat==toBeRemoved(currCh))=0;
+            end
+            
+            fltrWeights=zeros(size(inData,2));
+            for currEl=1:size(inData,2)
+                neighborsMap=zeros(size(tempMat));
+                neighborsMap(tempMat==currEl)=1;
+                neighborsMap=imdilate(neighborsMap,strel('diamond',1));
+                neighborsMap(tempMat==currEl)=0;
+                validNeighbors=logical(neighborsMap.*tempMat);
+                fltrWeights(currEl,tempMat(validNeighbors))=-1/sum(sum(validNeighbors));
+                fltrWeights(currEl,currEl)=1;
+            end
+            outData=inData*fltrWeights';
+            outData(:,toBeRemoved)=[];
         end
     end
 end
