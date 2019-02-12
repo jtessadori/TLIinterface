@@ -636,38 +636,18 @@ classdef TLIinterface < handle
             newFs=20;
 %             newFs=512;
             fltrdData=TLIinterface.applyLapFilter(fltrdData);
-%             fltrdData=fltrdData-repmat(median(fltrdData,2),1,size(fltrdData,2));
-%             for currCh=1:size(fltrdData,2)
-%                 fltrdData(:,currCh)=fltrdData(:,currCh)-median(fltrdData(:,[1:currCh-1,currCh+1:end]),2);
-%             end
-%             fltrdData=obj.outputLog.rawData;
             
             % Recover relevant windows
             winLims=[-.2,.8];
+%             winLims=[.3,.6];
             winIdxs=round(winLims*newFs);
             lbls=obj.outputLog.stimType;
             data=zeros(length(lbls),winIdxs(2)-winIdxs(1),size(obj.outputLog.rawData,2));
             for currTrial=1:length(obj.outputLog.stimStart)
                 data(currTrial,:,:)=reshape(fltrdData(round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(1)+1:round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(2),:),1,floor((winLims(2)-winLims(1))*newFs),[]);
-                data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,1:round(-winLims(1)*newFs),:),2),1,size(data,2),1);
+%                 data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,1:round(-winLims(1)*newFs),:),2),1,size(data,2),1);
+                data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,:,:),2),1,size(data,2),1);
             end
-%             data=data(:,round(-winLims(1)*obj.fs)+1:end,:);
-%             lbls=obj.outputLog.stimType(1:size(obj.outputLog.EPdata,1));
-%             classId=unique(lbls);
-%             nClasses=length(classId);
-%             trialMeans=[];
-%             trialLbls=[];
-%             for currTrial=1:floor(length(obj.outputLog.stimType)/obj.EPparams.stimsPerStretch)
-%                 relData=obj.outputLog.EPdata((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch,:,:);
-%                 relLbls=lbls((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch);
-%                 for currClass=1:nClasses
-%                     classData=relData(relLbls==classId(currClass),:,:);
-%                     trialMeans=cat(1,trialMeans,median(classData,1));
-%                     trialLbls=cat(1,trialLbls,classId(currClass));
-%                 end
-%             end
-%             ceLbls=trialLbls(trialLbls>0);
-%             ceMean=trialMeans(trialLbls>0,:,:);
         end
         
         function [ceLbls,feats]=recoverTrialMoments(obj)
@@ -730,56 +710,36 @@ classdef TLIinterface < handle
                 p(currFeat)=ranksum(feats(lbls2==1,currFeat),feats(lbls2==2,currFeat));
             end
             feats2=feats(:,p<.05);
-%             discr=fitcdiscr(feats2,lbls2,'crossVal','on','KFold',10,'DiscrimType','linear','Gamma',0,'FillCoeffs','off','ClassNames',[1;2]);
-%             discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',1);
-            discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
-            stEst=discr.kfoldPredict;
-            stBAcc=testAcc(lbls2,stEst);
             
-            classEst=zeros(floor(length(lbls2)/60),1);
-            for currTrial=1:floor(length(lbls2)/60)
-                relIdx=(currTrial-1)*60+1:currTrial*60;
-                classEst(currTrial)=mode(double(stEst(relIdx)==lbls2(relIdx)));
+            for currSel=1:floor(length(lbls2)/60)
+                relIdxs=(currSel-1)*60+1:currSel*60;
+                lblsV1=lbls2;
+                lblsV2=lbls2;
+                lblsV2(relIdxs)=3-lblsV2(relIdxs);
+                discr=fitcsvm(feats2,lblsV1,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+                stEst=discr.predict(feats2);
+                stBAcc1=testAcc(lblsV1,stEst);
+                discr=fitcsvm(feats2,lblsV2,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+                stEst=discr.predict(feats2);
+                stBAcc2=testAcc(lblsV2,stEst);
+                classEst(currSel)=stBAcc1>stBAcc2;
+                [stBAcc1,stBAcc2]
             end
             classAcc=mean(classEst);
-            fprintf('Single trial BAcc: %0.2f; class acc: %0.2f\n',stBAcc,classAcc);
+            stBAcc=max(stBAcc1,stBAcc2);
             
-%             % Recover data
-%             [lbls,data]=averageEPs(obj);
+%             discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+% %             discr=TreeBagger(400,feats2,lbls2,'OOBVarImp','On');
+%             stEst=discr.kfoldPredict;
+%             stBAcc=testAcc(lbls2,stEst);
 %             
-%             % Remove first selection, affected by ampl noise, and confounds
-%             lbls(1:120)=0;
-%             data2=data(lbls>0,:,:);
-%             lbls2=lbls(lbls>0);
-%             
-%             % Perform crossvalidation
-%             BAcc=TSclassifier.crossValTime(data2,lbls2,5);
-%             % Compute correct/erroneous lbls and means over repetitions
-%             % within the same trial
-%             [ceLbls,ceMean]=averageEPs(obj);
-%             
-%             trialEst=zeros(size(ceLbls));
-%             trialScore=zeros(size(ceLbls));
-%             % Perform LOO cross classification
-%             for currTrial=1:length(ceLbls)/2
-%                 trainIdx=[1:(currTrial-1)*2,currTrial*2+1:length(ceLbls)];
-%                 testIdx=(currTrial-1)*2+1:currTrial*2;
-%                 trainData=ceMean(trainIdx,:,:);
-%                 testData=ceMean(testIdx,:,:);
-%                 trainLbls=ceLbls(trainIdx);
-%                 
-%                 % Train classifier
-%                 clsfr=TSclassifier.timeTrain(trainData,trainLbls);
-%                 
-%                 % Compute results
-%                 [trialEst(testIdx),trialScore(testIdx)]=TSclassifier.timePredict(clsfr,testData);
+%             classEst=zeros(floor(length(lbls2)/60),1);
+%             for currTrial=1:floor(length(lbls2)/60)
+%                 relIdx=(currTrial-1)*60+1:currTrial*60;
+%                 classEst(currTrial)=mode(double(stEst(relIdx)==lbls2(relIdx)));
 %             end
-%             fixedTrialEst=zeros(length(ceLbls)/2,1);
-%             for currTrial=1:length(fixedTrialEst)
-%                 fixedTrialEst(currTrial)=trialScore(currTrial*2-1)<trialScore(currTrial*2);
-%             end
-%             acc=mean(fixedTrialEst==1);
-%             fprintf('BAcc: %0.2f\nFixed acc: %0.2f\n',testAcc(ceLbls,trialEst),acc);
+%             classAcc=mean(classEst);
+%             fprintf('Single trial BAcc: %0.2f; class acc: %0.2f\n',stBAcc,classAcc);
         end
         
         function trainOfflineClassifier(obj)

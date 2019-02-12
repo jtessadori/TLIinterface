@@ -127,6 +127,7 @@ classdef TSclassifier < handle
             % Generate partitions
             C.NumTestSets=nPartitions;
             C.groups=ceil(linspace(1/length(lbls),C.NumTestSets,length(lbls)));
+            C.groups=C.groups(randperm(length(C.groups)));
             C.training=@(currGroup)C.groups~=currGroup;
             C.test=@(currGroup)C.groups==currGroup;
             
@@ -170,10 +171,17 @@ classdef TSclassifier < handle
             RS=riemannSpace(superTrainFeats);
             
             % Project train data to tangent space
-            s=TSclassifier.projectData(superTrainFeats,RS);
+            trainProj=TSclassifier.projectData(superTrainFeats,RS);
             
             % Perform PCA
-            [clsfr.coeff,trainProj,latent]=pca(s);
+            [clsfr.coeff,trainProj,latent]=pca(trainProj);
+            
+%             % Perform feature selection
+%             p=zeros(size(trainProj,2),1);
+%             for currFeat=1:size(trainProj,2)
+%                 p(currFeat)=ranksum(trainProj(lbls==1,currFeat),trainProj(lbls==2,currFeat));
+%             end
+%             clsfr.featsIdx=find(p<0.05);
             
             % Perform feature selection
             clsfr.featsIdx=TSclassifier.selectFeatures(trainProj,lbls,latent);
@@ -184,6 +192,12 @@ classdef TSclassifier < handle
             
             % Perform training
             clsfr.clsfr=fitcdiscr(trainProj,lbls);
+            
+            % Evaluate through cross validation
+            discr=fitcdiscr(trainProj,lbls,'crossVal','on','KFold',10);
+            stEst=discr.kfoldPredict;
+            stBAcc=testAcc(lbls,stEst);
+            fprintf('Training crossval BAcc: %0.2f\n',stBAcc);
         end
         
         function superTrial=constructSuperTrials(inData,classMeans)
@@ -202,10 +216,10 @@ classdef TSclassifier < handle
             RS=riemannSpace(superTrainFeats);
             
             % Project data to tangent space
-            s=TSclassifier.projectData(superTrainFeats,RS);
+            testProj=TSclassifier.projectData(superTrainFeats,RS);
             
             % Apply PCA coefficients
-            testProj=s*clsfr.coeff;
+            testProj=testProj*clsfr.coeff;
             
             % Select features
             testProj=testProj(:,clsfr.featsIdx);
