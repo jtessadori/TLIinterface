@@ -31,6 +31,7 @@ classdef TLIinterface < handle
         stimType;
         EPsequence;
         EPdata;
+        EPdataBlock;
         currStim;
         classifier;
         stretchScore;
@@ -50,6 +51,7 @@ classdef TLIinterface < handle
         targetCharacterIdx;
         selHistory=[];
         stimNext=1;
+        stimResponsesLogged=0;
     end
     
     methods
@@ -103,6 +105,7 @@ classdef TLIinterface < handle
                 obj.EPparams.stimLength=.1;
                 obj.EPparams.stimTypes=3;
             end
+            obj.EPdataBlock=zeros(obj.EPparams.stimsPerStretch,obj.fs,16);
                         
             % Determine name to be used to save file upon closing
             obj.fileName=datestr(now,30);
@@ -114,7 +117,7 @@ classdef TLIinterface < handle
             obj.prepareSimulinkModel;
             
             % Perform a countdown to allow amplifier to settle
-            obj.startCountdown(30);
+            obj.startCountdown(60);
             
             % Define interface object colors
             obj.colorScheme.bg=[.05,.05,.05];
@@ -165,6 +168,7 @@ classdef TLIinterface < handle
                 
         function closeActivity(obj)
             % Stop running timer
+            pause(1);
             stop(obj.trialEventTimer);
             pause(1);
             
@@ -336,9 +340,6 @@ classdef TLIinterface < handle
                 if obj.stimNext
                     if obj.currStim<=length(obj.EPsequence)
                         obj.stimType=obj.EPsequence(obj.currStim);
-                    else
-                        r=rand;
-                        obj.stimType=(r<0.125)+(r<0.25);
                     end
                     stimStrength=120;
                     switch obj.stimType
@@ -357,11 +358,14 @@ classdef TLIinterface < handle
                     obj.currStim=obj.currStim+1;
                     obj.trialEventTimer.StartDelay=obj.EPparams.stimLength;
                     
-%                     % Start timer to log data
-%                     obj.EPdataLogger=timer;
-%                     obj.EPdataLogger.TimerFcn=@obj.logEPdata;
-%                     obj.EPdataLogger.StartDelay=0.8;
-%                     start(obj.EPdataLogger);
+                    % Relevant data windows are immediately necessary only
+                    % during testing
+                    if ~obj.isCalibrating
+                        obj.EPdataLogger=timer;
+                        obj.EPdataLogger.TimerFcn=@obj.logEPdata;
+                        obj.EPdataLogger.StartDelay=0.8;
+                        start(obj.EPdataLogger);
+                    end
                 else
                     % Stop tactile stimulation
                     obj.stimNext=1;
@@ -369,29 +373,11 @@ classdef TLIinterface < handle
                     pause(0.05);
                     fprintf(obj.motorSerialPort,'r0\n');
                     if obj.currStim>length(obj.EPsequence)
-                        if obj.isCalibrating
-                            obj.trialEventTimer.TimerFcn=@obj.endTrial;
-                        elseif obj.stimType>0
-                            % Recover relevant stimuli delivered since last
-                            % trial start, average them, then provide a
-                            % prediction
-                            stimSinceTrialStartIdx=obj.outputLog.stimStart>obj.outputLog.iterationTimes(end);
-                            cl1median=median(obj.outputLog.EPdata(logical(stimSinceTrialStartIdx.*(obj.outputLog.stimType==1)),:,:));
-                            cl2median=median(obj.outputLog.EPdata(logical(stimSinceTrialStartIdx.*(obj.outputLog.stimType==2)),:,:));
-                            [trialEst,trialScore]=TSclassifier.timePredict(obj.classifier,cat(1,cl1median,cl2median));
-                            obj.stretchScore=diff(real(trialScore));
-                            obj.logEntry({'stretchScore'});
-                            obj.logTime('scoreEstTimes');
-                            fprintf('%d - %d\n',sum(stimSinceTrialStartIdx.*(obj.outputLog.stimType==1)),sum(stimSinceTrialStartIdx.*(obj.outputLog.stimType==2)));
-                            fprintf('%0.2f\n',diff(real(trialScore)));
-                            fprintf('%0.2f\n',obj.classifier.scoreProbModel(sum(obj.outputLog.stretchScore(obj.outputLog.scoreEstTimes>obj.outputLog.iterationTimes(end)))));
-                            if abs(.5-obj.classifier.scoreProbModel(sum(obj.outputLog.stretchScore(obj.outputLog.scoreEstTimes>obj.outputLog.iterationTimes(end)))))>.4
-                                obj.finalEst=trialEst(1);
-                                obj.trialEventTimer.TimerFcn=@obj.endTrial;
-                            end
-                        end
+                        obj.trialEventTimer.TimerFcn=@obj.endTrial;
+                        obj.trialEventTimer.StartDelay=1;
+                    else
+                        obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
                     end
-                    obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
                 end
                 start(obj.trialEventTimer);
             catch ME
@@ -401,13 +387,41 @@ classdef TLIinterface < handle
         end
         
         function logEPdata(obj,~,~)
-            % Log time data around last stim
-            obj.EPdata=obj.lastDataBlock(1,end-obj.fs+1:end,:);
-            obj.logEntry({'EPdata'});
+            try
+                % Log time data around last stim
+                obj.stimResponsesLogged=obj.stimResponsesLogged+1;
+                obj.EPdata=obj.lastDataBlock(1,end-obj.fs+1:end,:);
+                obj.EPdataBlock(obj.stimResponsesLogged,:,:)=obj.EPdata;
+            catch ME
+                fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
+                keyboard;
+            end
         end
                                         
         function endTrial(obj,~,~)
             try
+                % If testing is ongoing, I need to provide an estimation of
+                % user intention during last selection
+                if ~obj.isCalibrating
+                    obj.stimResponsesLogged=0;
+                    recentLbls=obj.EPsequence;
+                    recentData=obj.EPdataBlock(recentLbls>0,:,:);
+                    recentLbls(recentLbls==0)=[];
+                    normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+                    recentDataShort=zeros(size(recentData,1),20,size(recentData,3));
+                    for currEP=1:size(recentData,1)
+                        recentData(currEP,:,:)=normalize(squeeze(recentData(currEP,:,:)));
+                        recentDataShort(currEP,:,:)=resample(squeeze(recentData(currEP,:,:)),20,obj.fs);
+                        recentDataShort(currEP,:,:)=recentDataShort(currEP,:,:)-repmat(mean(recentDataShort(currEP,:,:),2),1,size(recentDataShort,2),1);
+                    end
+                    recentFeats=reshape(recentDataShort,length(recentLbls),[]);
+                    recentFeats=recentFeats*obj.classifier.PCAcoeffs;
+                    recentFeats=recentFeats(:,obj.classifier.featsIdx);
+                    
+                    % Perform prediction on preproc'd data
+                    lblsEst=obj.classifier.clsfr.predict(recentFeats);
+                    obj.finalEst=mode((xor((lblsEst-1),(recentLbls-1)))+1);
+                end
                 % If not free writing, log labels
                 if ~obj.isFreeWriting
                     obj.finalLbls=obj.targetPos;
@@ -437,15 +451,6 @@ classdef TLIinterface < handle
                 % Remove edge from target letters
                 set(obj.figureParams.letters(obj.targetPos),'EdgeColor',obj.colorScheme.bg);
                 drawnow;
-                
-%                 % If large enough number of iterations have occurred
-%                 if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=400
-%                     fprintf('Target accuracy reached, shutting down.\n');
-%                     obj.stopCalibration;
-%                     return;
-%                 else
-%                     fprintf('%d/400\n',length(obj.outputLog.movCorrect));
-%                 end
                 
                 % Update selection counter. If last level is reached, end
                 % current selection
@@ -625,135 +630,79 @@ classdef TLIinterface < handle
         end
         
         %% Plotting and analysis functions
-        
-        function [lbls,data]=averageEPs(obj)
-            % Frequency filters data
-            normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
-            [B,A]=cheby1(2,6,[.1,10]/(obj.fs/2));
-%             fltrdData=filter(B,A,obj.outputLog.rawData);
-            fltrdData=normalize(filter(B,A,obj.outputLog.rawData));
-            fltrdData=resample(fltrdData,20,obj.fs);
-            newFs=20;
-%             newFs=512;
-            fltrdData=TLIinterface.applyLapFilter(fltrdData);
+        function [stBAcc,classAcc]=estimateOfflineAcc(obj)            
+            % Preprocess data
+            [feats2,lbls2]=obj.preprocData;
             
-            % Recover relevant windows
-            winLims=[-.2,.8];
-%             winLims=[.3,.6];
-            winIdxs=round(winLims*newFs);
-            lbls=obj.outputLog.stimType;
-            data=zeros(length(lbls),winIdxs(2)-winIdxs(1),size(obj.outputLog.rawData,2));
-            for currTrial=1:length(obj.outputLog.stimStart)
-                data(currTrial,:,:)=reshape(fltrdData(round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(1)+1:round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(2),:),1,floor((winLims(2)-winLims(1))*newFs),[]);
-%                 data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,1:round(-winLims(1)*newFs),:),2),1,size(data,2),1);
-                data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,:,:),2),1,size(data,2),1);
+            % Perform classifier cross-validation, both for single trials
+            % and selections
+            discr=fitcsvm(feats2,lbls2,'Kfold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+            lblsEst=discr.kfoldPredict;
+            stBAcc=testAcc(lbls2,lblsEst);
+            relEls=sum(obj.EPsequence>0);
+            classEst=zeros(floor(length(lbls2)/relEls),1);
+            for currSel=1:floor(length(lbls2)/relEls)
+                relIdxs=(currSel-1)*relEls+1:currSel*relEls;
+                classEst(currSel)=mode(double(lblsEst(relIdxs)==lbls2(relIdxs)));
             end
+            classAcc=mean(classEst);
         end
         
-        function [ceLbls,feats]=recoverTrialMoments(obj)
-            % Recover moments in each trial, for each time point and each
-            % class
-            lbls=obj.outputLog.stimType(1:size(obj.outputLog.EPdata,1));
-            classId=unique(lbls);
-            nClasses=length(classId);
-            trialMeans=[];
-            trialSD=[];
-            trialSkew=[];
-            trialLbls=[];
-            trialKurt=[];
-            for currTrial=1:floor(length(obj.outputLog.stimType)/obj.EPparams.stimsPerStretch)
-                relData=obj.outputLog.EPdata((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch,:,:);
-                relDataShort=zeros(size(relData,1),ceil(size(relData,2)/(obj.fs/20)),size(relData,3));
-                for currCh=1:16
-                    relDataShort(:,:,currCh)=resample(squeeze(relData(:,:,currCh)'),20,obj.fs)';
-                end
-                relData=relDataShort;
-                relLbls=lbls((currTrial-1)*obj.EPparams.stimsPerStretch+1:currTrial*obj.EPparams.stimsPerStretch);
-                for currClass=1:nClasses
-                    classData=relData(relLbls==classId(currClass),:,:);
-                    trialMeans=cat(1,trialMeans,mean(classData,1));
-                    trialSD=cat(1,trialSD,std(classData,[],1));
-                    trialSkew=cat(1,trialSkew,skewness(classData,[],1));
-                    trialKurt=cat(1,trialKurt,kurtosis(classData,[],1));
-                    trialLbls=cat(1,trialLbls,classId(currClass));
-                end
-            end
-            ceLbls=trialLbls(trialLbls>0);
-            ceMean=trialMeans(trialLbls>0,:,:);
-            ceSD=trialSD(trialLbls>0,:,:);
-            ceSkew=trialSkew(trialLbls>0,:,:);
-            ceKurt=trialKurt(trialLbls>0,:,:);
+        function trainOfflineClassifier(obj)
+            % Preproc data
+            [feats2,lbls2,obj.classifier.PCAcoeffs,obj.classifier.featsIdx]=obj.preprocData;
             
-            % First four trial still are affected by startup
-            ceLbls=ceLbls(120:end);
-            ceMean=ceMean(120:end,:,:);
-            ceSD=ceSD(120:end,:,:);
-            ceSkew=ceSkew(120:end,:,:);
-            ceKurt=ceKurt(120:end,:,:);
-            
-            % Join moments together and treat them as features for
-            % classifier
-            feats=cat(3,ceMean,ceSD,ceSkew,ceKurt);
-            feats=reshape(feats,size(feats,1),[]);
+            % Train classifier
+            obj.classifier.clsfr=fitcsvm(feats2,lbls2,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
         end
         
-        function [stBAcc,classAcc]=estimateOfflineAcc(obj)
+        function [feats2,lbls2,PCAcoeffs,featsIdx]=preprocData(obj)
+            % Recover relevant windows and preprocess them
             [lbls,data]=averageEPs(obj);
+            
             % Remove first selection, affected by ampl noise, and confounds
             lbls(1:120)=0;
             data2=data(lbls>0,:,:);
             lbls2=lbls(lbls>0);
             feats=reshape(data2,size(data2,1),[]);
             
+            % Perform PCA
+            [PCAcoeffs,feats,~]=pca(feats);
+            
+            % Perform a simple feature selection
             p=zeros(size(feats,2),1);
             for currFeat=1:size(feats,2)
                 p(currFeat)=ranksum(feats(lbls2==1,currFeat),feats(lbls2==2,currFeat));
             end
-            feats2=feats(:,p<.05);
-            
-            for currSel=1:floor(length(lbls2)/60)
-                relIdxs=(currSel-1)*60+1:currSel*60;
-                lblsV1=lbls2;
-                lblsV2=lbls2;
-                lblsV2(relIdxs)=3-lblsV2(relIdxs);
-                discr=fitcsvm(feats2,lblsV1,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
-                stEst=discr.predict(feats2);
-                stBAcc1=testAcc(lblsV1,stEst);
-                discr=fitcsvm(feats2,lblsV2,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
-                stEst=discr.predict(feats2);
-                stBAcc2=testAcc(lblsV2,stEst);
-                classEst(currSel)=stBAcc1>stBAcc2;
-                [stBAcc1,stBAcc2]
-            end
-            classAcc=mean(classEst);
-            stBAcc=max(stBAcc1,stBAcc2);
-            
-%             discr=fitcsvm(feats2,lbls2,'crossVal','on','KFold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
-% %             discr=TreeBagger(400,feats2,lbls2,'OOBVarImp','On');
-%             stEst=discr.kfoldPredict;
-%             stBAcc=testAcc(lbls2,stEst);
-%             
-%             classEst=zeros(floor(length(lbls2)/60),1);
-%             for currTrial=1:floor(length(lbls2)/60)
-%                 relIdx=(currTrial-1)*60+1:currTrial*60;
-%                 classEst(currTrial)=mode(double(stEst(relIdx)==lbls2(relIdx)));
-%             end
-%             classAcc=mean(classEst);
-%             fprintf('Single trial BAcc: %0.2f; class acc: %0.2f\n',stBAcc,classAcc);
+            featsIdx=find(p<.05);
+            feats2=feats(:,featsIdx);
         end
         
-        function trainOfflineClassifier(obj)
-            % Compute correct/erroneous lbls and means over repetitions
-            % within the same trial
-            [ceLbls,ceMean]=averageEPs(obj);
+        function [lbls,data]=averageEPs(obj)
+            % Normalize and frequency filters data
+            normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+            [B,A]=cheby1(2,6,[.1,10]/(obj.fs/2));
+            fltrdData=normalize(filter(B,A,obj.outputLog.rawData));
             
-            % Train classifier
-            obj.classifier=TSclassifier.timeTrain(ceMean,ceLbls);
+            % Subsample data at twice the high cutoff freq
+            fltrdData=resample(fltrdData,20,obj.fs);
+            newFs=20;
             
-            % Determine score/prob model
-            [~,score]=TSclassifier.timePredict(obj.classifier,ceMean);
-            scoreProbModel=fittype('1/(1+exp(-(a*x+b)))');
-            obj.classifier.scoreProbModel=fit(real(score),ceLbls-1,scoreProbModel,'Robust','on');
+            % Spatial filtering
+            %             fltrdData=TLIinterface.applyLapFilter(fltrdData);
+            
+            % Recover relevant windows
+            winLims=[-.2,.8];
+            winIdxs=round(winLims*newFs);
+            lbls=obj.outputLog.stimType;
+            if round(obj.outputLog.stimStart(end)*newFs)+winIdxs(2)>length(fltrdData)
+                lbls(end)=[]; % Remove last entry if recordings does not contain the full relevant window
+            end
+            data=zeros(length(lbls),winIdxs(2)-winIdxs(1),size(obj.outputLog.rawData,2));
+            for currTrial=1:length(lbls)
+                data(currTrial,:,:)=reshape(fltrdData(round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(1)+1:round(obj.outputLog.stimStart(currTrial)*newFs)+winIdxs(2),:),1,floor((winLims(2)-winLims(1))*newFs),[]);
+                data(currTrial,:,:)=data(currTrial,:,:)-repmat(mean(data(currTrial,:,:),2),1,size(data,2),1);
+            end
         end
                
         function plotGAs(obj)
