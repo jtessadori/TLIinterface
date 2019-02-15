@@ -70,7 +70,7 @@ classdef TSclassifier < handle
                 
                 % Perform feature selection
                 featsIdx=TSclassifier.selectFeatures(trainProj,trainLbls,latent);
-                fprintf('nFeats: %d\n',length(featsIdx));
+%                 fprintf('nFeats: %d\n',length(featsIdx));
                 
                 % Leave only selected features
                 trainProj=trainProj(:,featsIdx);
@@ -168,10 +168,10 @@ classdef TSclassifier < handle
             superTrainFeats=TSclassifier.constructSuperTrials(data,classMeans);
             
             % Compute Riemann-mean
-            RS=riemannSpace(superTrainFeats);
+            clsfr.RS=riemannSpace(superTrainFeats);
             
             % Project train data to tangent space
-            trainProj=TSclassifier.projectData(superTrainFeats,RS);
+            trainProj=TSclassifier.projectData(superTrainFeats,clsfr.RS);
             
             % Perform PCA
             [clsfr.coeff,trainProj,latent]=pca(trainProj);
@@ -185,7 +185,7 @@ classdef TSclassifier < handle
             
             % Perform feature selection
             clsfr.featsIdx=TSclassifier.selectFeatures(trainProj,lbls,latent);
-            fprintf('nFeats: %d\n',length(clsfr.featsIdx));
+%             fprintf('nFeats: %d\n',length(clsfr.featsIdx));
             
             % Leave only selected features
             trainProj=trainProj(:,clsfr.featsIdx);
@@ -193,11 +193,54 @@ classdef TSclassifier < handle
             % Perform training
             clsfr.clsfr=fitcdiscr(trainProj,lbls);
             
-            % Evaluate through cross validation
-            discr=fitcdiscr(trainProj,lbls,'crossVal','on','KFold',10);
-            stEst=discr.kfoldPredict;
-            stBAcc=testAcc(lbls,stEst);
-            fprintf('Training crossval BAcc: %0.2f\n',stBAcc);
+%             % Evaluate through cross validation
+%             discr=fitcdiscr(trainProj,lbls,'crossVal','on','KFold',10);
+%             stEst=discr.kfoldPredict;
+%             stBAcc=testAcc(lbls,stEst);
+%             fprintf('Training crossval BAcc: %0.2f\n',stBAcc);
+        end
+        
+        function clsfr=train(data,lbls)
+            % Compute Riemann-mean
+            clsfr.RS=riemannSpace(data);
+            
+            % Project train data to tangent space
+            trainProj=TSclassifier.projectData(data,clsfr.RS);
+            
+            % Perform PCA
+            [clsfr.coeff,trainProj,latent]=pca(trainProj);
+            
+            %             % Perform feature selection
+            %             p=zeros(size(trainProj,2),1);
+            %             for currFeat=1:size(trainProj,2)
+            %                 p(currFeat)=ranksum(trainProj(lbls==1,currFeat),trainProj(lbls==2,currFeat));
+            %             end
+            %             clsfr.featsIdx=find(p<0.05);
+            
+            % Perform feature selection
+            clsfr.featsIdx=TSclassifier.selectFeatures(trainProj,lbls,latent);
+            fprintf('nFeats: %d\n',length(clsfr.featsIdx));
+            
+            % Leave only selected features
+            trainProj=trainProj(:,clsfr.featsIdx);
+            
+            % Perform training
+            clsfr.clsfr=fitcdiscr(trainProj,lbls);
+        end
+        
+        function [est,score]=predict(clsfr,data)
+            % Project data to tangent space
+            testProj=TSclassifier.projectData(data,clsfr.RS);
+            
+            % Apply PCA coefficients
+            testProj=testProj*clsfr.coeff;
+            
+            % Select features
+            testProj=testProj(:,clsfr.featsIdx);
+            
+            % Compute results
+            est=clsfr.clsfr.predict(testProj);
+            score=real(testProj*clsfr.clsfr.Coeffs(2,1).Linear+clsfr.clsfr.Coeffs(2,1).Const);
         end
         
         function superTrial=constructSuperTrials(inData,classMeans)
@@ -212,11 +255,8 @@ classdef TSclassifier < handle
             % Construct super trials
             superTrainFeats=TSclassifier.constructSuperTrials(data,clsfr.classMeans);
             
-            % Compute Riemann-mean
-            RS=riemannSpace(superTrainFeats);
-            
             % Project data to tangent space
-            testProj=TSclassifier.projectData(superTrainFeats,RS);
+            testProj=TSclassifier.projectData(superTrainFeats,clsfr.RS);
             
             % Apply PCA coefficients
             testProj=testProj*clsfr.coeff;
@@ -226,7 +266,7 @@ classdef TSclassifier < handle
             
             % Compute results
             est=clsfr.clsfr.predict(testProj);
-            score=testProj*clsfr.clsfr.Coeffs(2,1).Linear+clsfr.clsfr.Coeffs(2,1).Const;
+            score=real(testProj*clsfr.clsfr.Coeffs(2,1).Linear+clsfr.clsfr.Coeffs(2,1).Const);
         end
     end
 end
