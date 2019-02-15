@@ -48,10 +48,15 @@ classdef TLIinterface < handle
         RS;
         colorScheme;
         isDebugging;
+        isOngoing;
         targetCharacterIdx;
         selHistory=[];
         stimNext=1;
         stimResponsesLogged=0;
+    end
+    
+    properties (Dependent,Hidden)
+        targetPosLong;
     end
     
     methods
@@ -117,7 +122,7 @@ classdef TLIinterface < handle
             obj.prepareSimulinkModel;
             
             % Perform a countdown to allow amplifier to settle
-            obj.startCountdown(60);
+            obj.startCountdown(30);
             
             % Define interface object colors
             obj.colorScheme.bg=[.05,.05,.05];
@@ -164,10 +169,14 @@ classdef TLIinterface < handle
             
             % Add cursor square
             obj.figureParams.cursorHandle=patch(obj.screenRes(1)/2+obj.figureParams.squareVertexX,obj.screenRes(2)/2+obj.figureParams.squareVertexY,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+            
+            % Flag experiment as active
+            obj.isOngoing=1;
         end
                 
         function closeActivity(obj)
             % Stop running timer
+            obj.isOngoing=0;
             pause(1);
             stop(obj.trialEventTimer);
             pause(1);
@@ -333,53 +342,56 @@ classdef TLIinterface < handle
         
         function updateEPstretch(obj,~,~)
             try
-                % Generate new timer event, then either deliver stim or stop
-                % it. If all stims have been delivered, move on to next phase
-                obj.trialEventTimer=timer;
-                obj.trialEventTimer.TimerFcn=@obj.updateEPstretch;
-                if obj.stimNext
-                    if obj.currStim<=length(obj.EPsequence)
-                        obj.stimType=obj.EPsequence(obj.currStim);
-                    end
-                    stimStrength=120;
-                    switch obj.stimType
-                        case 0
-                            fprintf(obj.motorSerialPort,'e2\n');
-                        case 1
-                            fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos~=1)*4));
-                        case 2
-                            fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos==1)*4));
-                    end
-                    pause(0.05);
-                    fprintf(obj.motorSerialPort,sprintf('r%d\n',stimStrength));
-                    obj.logEntry({'stimType'});
-                    obj.logTime('stimStart');
-                    obj.stimNext=0;
-                    obj.currStim=obj.currStim+1;
-                    obj.trialEventTimer.StartDelay=obj.EPparams.stimLength;
-                    
-                    % Relevant data windows are immediately necessary only
-                    % during testing
-                    if ~obj.isCalibrating
-                        obj.EPdataLogger=timer;
-                        obj.EPdataLogger.TimerFcn=@obj.logEPdata;
-                        obj.EPdataLogger.StartDelay=0.8;
-                        start(obj.EPdataLogger);
-                    end
-                else
-                    % Stop tactile stimulation
-                    obj.stimNext=1;
-                    fprintf(obj.motorSerialPort,'e14\n');
-                    pause(0.05);
-                    fprintf(obj.motorSerialPort,'r0\n');
-                    if obj.currStim>length(obj.EPsequence)
-                        obj.trialEventTimer.TimerFcn=@obj.endTrial;
-                        obj.trialEventTimer.StartDelay=1;
+                % If experiment has been closed, skip call to this function
+                if obj.isOngoing
+                    % Generate new timer event, then either deliver stim or stop
+                    % it. If all stims have been delivered, move on to next phase
+                    obj.trialEventTimer=timer;
+                    obj.trialEventTimer.TimerFcn=@obj.updateEPstretch;
+                    if obj.stimNext
+                        if obj.currStim<=length(obj.EPsequence)
+                            obj.stimType=obj.EPsequence(obj.currStim);
+                        end
+                        stimStrength=120;
+                        switch obj.stimType
+                            case 0
+                                fprintf(obj.motorSerialPort,'e2\n');
+                            case 1
+                                fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos~=1)*4));
+                            case 2
+                                fprintf(obj.motorSerialPort,sprintf('e%d\n',4+(obj.targetPos==1)*4));
+                        end
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,sprintf('r%d\n',stimStrength));
+                        obj.logEntry({'stimType'});
+                        obj.logTime('stimStart');
+                        obj.stimNext=0;
+                        obj.currStim=obj.currStim+1;
+                        obj.trialEventTimer.StartDelay=obj.EPparams.stimLength;
+                        
+                        % Relevant data windows are immediately necessary only
+                        % during testing
+                        if ~obj.isCalibrating
+                            obj.EPdataLogger=timer;
+                            obj.EPdataLogger.TimerFcn=@obj.logEPdata;
+                            obj.EPdataLogger.StartDelay=0.9;
+                            start(obj.EPdataLogger);
+                        end
                     else
-                        obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
+                        % Stop tactile stimulation
+                        obj.stimNext=1;
+                        fprintf(obj.motorSerialPort,'e14\n');
+                        pause(0.05);
+                        fprintf(obj.motorSerialPort,'r0\n');
+                        if obj.currStim>length(obj.EPsequence)
+                            obj.trialEventTimer.TimerFcn=@obj.endTrial;
+                            obj.trialEventTimer.StartDelay=1;
+                        else
+                            obj.trialEventTimer.StartDelay=obj.EPparams.interStimLength;
+                        end
                     end
+                    start(obj.trialEventTimer);
                 end
-                start(obj.trialEventTimer);
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
                 keyboard;
@@ -390,7 +402,13 @@ classdef TLIinterface < handle
             try
                 % Log time data around last stim
                 obj.stimResponsesLogged=obj.stimResponsesLogged+1;
-                obj.EPdata=obj.lastDataBlock(1,end-obj.fs+1:end,:);
+                endTime=obj.currTime;
+                obj.logTime('endTime');
+                actualData=obj.lastDataBlock;
+                timeSinceStim=endTime-obj.outputLog.stimStart(length(obj.outputLog.endTime));
+                relIdxs=size(actualData,2)-round((timeSinceStim+0.2)*obj.fs):size(actualData,2)-round((timeSinceStim-0.8)*obj.fs)-1;
+                obj.EPdata=actualData(1,relIdxs,:);
+%                 obj.EPdata=actualData(1,1:512,:);
                 obj.EPdataBlock(obj.stimResponsesLogged,:,:)=obj.EPdata;
             catch ME
                 fprintf('%s Line: %d\n',ME.message,ME.stack(1).line)
@@ -420,7 +438,7 @@ classdef TLIinterface < handle
                     
                     % Perform prediction on preproc'd data
                     lblsEst=obj.classifier.clsfr.predict(recentFeats);
-                    obj.finalEst=mode((xor((lblsEst-1),(recentLbls-1)))+1);
+                    obj.finalEst=mode(recentLbls(lblsEst==2));
                 end
                 % If not free writing, log labels
                 if ~obj.isFreeWriting
@@ -632,19 +650,101 @@ classdef TLIinterface < handle
         %% Plotting and analysis functions
         function [stBAcc,classAcc]=estimateOfflineAcc(obj)            
             % Preprocess data
-            [feats2,lbls2]=obj.preprocData;
+            [data,lbls]=obj.preprocData;
             
             % Perform classifier cross-validation, both for single trials
             % and selections
-            discr=fitcsvm(feats2,lbls2,'Kfold',10,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
-            lblsEst=discr.kfoldPredict;
-            stBAcc=testAcc(lbls2,lblsEst);
             relEls=sum(obj.EPsequence>0);
-            classEst=zeros(floor(length(lbls2)/relEls),1);
-            for currSel=1:floor(length(lbls2)/relEls)
-                relIdxs=(currSel-1)*relEls+1:currSel*relEls;
-                classEst(currSel)=mode(double(lblsEst(relIdxs)==lbls2(relIdxs)));
+            selLbls=ceil((1:length(lbls))/relEls);
+            lblsEst=zeros(size(lbls));
+            score=zeros(length(lbls),2);
+            classEst=zeros(floor(length(lbls)/relEls),1);
+            for currSel=1:max(selLbls)
+                relIdxs=selLbls~=currSel;
+                trainData=data(relIdxs,:,:);
+                trainLbls=lbls(relIdxs);
+                testLbls=lbls(~relIdxs);
+                
+%                 % Compute CSP
+                CSPcoeffs=computeCSPs({trainData(trainLbls==1,:,:),trainData(trainLbls==2,:,:)});
+                for currTrial=1:length(lbls)
+                    data(currTrial,:,:)=squeeze(data(currTrial,:,:))*CSPcoeffs;
+                end
+                trainFeats=reshape(data(relIdxs,:,:),length(trainLbls),[]);
+                testFeats=reshape(data(~relIdxs,:,:),length(testLbls),[]);
+% 
+%                 % Compute PCA
+                [PCAcoeffs,~,weights]=pca(trainFeats);
+                trainFeats=trainFeats*PCAcoeffs;
+                testFeats=testFeats*PCAcoeffs;
+%                 trainFeats=trainFeats(:,cumsum(weights)/sum(weights)<.9);
+%                 testFeats=testFeats(:,cumsum(weights)/sum(weights)<.9);
+
+%                 
+%                 for currFeat=1:size(trainFeats,2)
+%                     p11(currFeat)=ranksum(trainFeats(trainLbls==1,currFeat),testFeats(testLbls==1,currFeat));
+%                     p12(currFeat)=ranksum(trainFeats(trainLbls==1,currFeat),testFeats(testLbls==2,currFeat));
+%                     p21(currFeat)=ranksum(trainFeats(trainLbls==2,currFeat),testFeats(testLbls==1,currFeat));
+%                     p22(currFeat)=ranksum(trainFeats(trainLbls==2,currFeat),testFeats(testLbls==2,currFeat));
+%                 end
+                
+                % Perform a simple feature selection
+                p=zeros(size(trainFeats,2),1);
+                for currFeat=1:size(trainFeats,2)
+                    p(currFeat)=ranksum(trainFeats(trainLbls==1,currFeat),trainFeats(trainLbls==2,currFeat));
+                end
+                featsIdx=find((p<.05).*(weights>.01));
+%                 featsIdx=find((p<.05));
+%                 %                 featsIdx=TSclassifier.selectFeatures(trainFeats,trainLbls,weights);
+                trainFeats=trainFeats(:,featsIdx);
+                testFeats=testFeats(:,featsIdx);
+%                 
+%                 % Compute gm models
+%                 gmm1=fitgmdist(trainFeats(trainLbls==1,:),1,'CovType','Diagonal');
+%                 gmm2=fitgmdist(trainFeats(trainLbls==2,:),1,'CovType','Diagonal');
+%                 
+%                 % Compute probabilty of each point of belonging to either
+%                 % class
+%                 P1=gmm1.pdf(testFeats)./(gmm2.pdf(testFeats)+gmm1.pdf(testFeats));
+%                 P2=gmm2.pdf(testFeats)./(gmm2.pdf(testFeats)+gmm1.pdf(testFeats));
+%                 lblsEst(~relIdxs)=(P1<P2)+1;
+%                 classEst(currSel)=mode(double(lblsEst(~relIdxs)==testLbls));
+                
+%                 % Outliers are unreliable: remove them
+%                 th=.65;
+%                 toBeRemoved=logical((P1>th)+(P2>th));
+%                 P1(toBeRemoved)=[];
+%                 P2(toBeRemoved)=[];
+%                 classEst(currSel)=mode(double(((P1>P2)+1)==testLbls(~toBeRemoved)));
+                
+% %                 
+%                 classEst(currSel)=sum(log(gmm1.pdf(testFeats(testLbls==1,:))))+sum(log(gmm2.pdf(testFeats(testLbls==2,:))))>sum(log(gmm2.pdf(testFeats(testLbls==1,:))))+sum(log(gmm1.pdf(testFeats(testLbls==2,:))));
+%                 discr=fitcsvm(trainFeats,trainLbls,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+%                 fitPosterior(discr);
+% %                 discr=fitcdiscr(trainFeats,trainLbls,'ClassNames',[1;2],'discrimType','diagLinear');
+%                 [lblsEst(~relIdxs),score(~relIdxs,:)]=discr.predict(testFeats);
+%                 
+% %                 discr2=fitcsvm(testFeats,testLbls,'ClassNames',[1;2],'KFold',10,'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
+% %                 lblsEst2=discr2.kfoldPredict;
+% %                 keyboard;
+%                 classEst(currSel)=mode(double(lblsEst(~relIdxs)==lbls(~relIdxs)));
+%                 classEst(currSel)=sum(score(~relIdxs,1).*(lbls(~relIdxs)==1))>sum(score(~relIdxs,1).*(lbls(~relIdxs)==2));
+trainFeatsMean1=median(trainFeats(trainLbls==1,:));
+trainFeatsMean2=median(trainFeats(trainLbls==2,:));
+trainFeatsSigma1=1.4826*mad(trainFeats(trainLbls==1,:),1);
+trainFeatsSigma2=1.4826*mad(trainFeats(trainLbls==2,:),1);
+testFeatsMean1=median(testFeats(testLbls==1,:));
+testFeatsMean2=median(testFeats(testLbls==2,:));
+testFeatsSigma1=1.4826*mad(testFeats(testLbls==1,:),1);
+testFeatsSigma2=1.4826*mad(testFeats(testLbls==2,:),1);
+D11=sum(((trainFeatsMean1-testFeatsMean1)./sqrt((trainFeatsSigma1).^2+(testFeatsSigma1).^2)).^2);
+D12=sum(((trainFeatsMean1-testFeatsMean2)./sqrt((trainFeatsSigma1).^2+(testFeatsSigma2).^2)).^2);
+D21=sum(((trainFeatsMean2-testFeatsMean1)./sqrt((trainFeatsSigma2).^2+(testFeatsSigma1).^2)).^2);
+D22=sum(((trainFeatsMean2-testFeatsMean2)./sqrt((trainFeatsSigma2).^2+(testFeatsSigma2).^2)).^2);
+classEst(currSel)=(D11+D22)<(D12+D21);
             end
+            stBAcc=testAcc(lbls,lblsEst);
+%             stBAcc=NaN;
             classAcc=mean(classEst);
         end
         
@@ -656,7 +756,7 @@ classdef TLIinterface < handle
             obj.classifier.clsfr=fitcsvm(feats2,lbls2,'ClassNames',[1;2],'Standardize',true,'KernelScale',30,'KernelFunction','rbf');
         end
         
-        function [feats2,lbls2,PCAcoeffs,featsIdx]=preprocData(obj)
+        function [data2,lbls2]=preprocData(obj)
             % Recover relevant windows and preprocess them
             [lbls,data]=averageEPs(obj);
             
@@ -664,18 +764,6 @@ classdef TLIinterface < handle
             lbls(1:120)=0;
             data2=data(lbls>0,:,:);
             lbls2=lbls(lbls>0);
-            feats=reshape(data2,size(data2,1),[]);
-            
-            % Perform PCA
-            [PCAcoeffs,feats,~]=pca(feats);
-            
-            % Perform a simple feature selection
-            p=zeros(size(feats,2),1);
-            for currFeat=1:size(feats,2)
-                p(currFeat)=ranksum(feats(lbls2==1,currFeat),feats(lbls2==2,currFeat));
-            end
-            featsIdx=find(p<.05);
-            feats2=feats(:,featsIdx);
         end
         
         function [lbls,data]=averageEPs(obj)
@@ -683,13 +771,14 @@ classdef TLIinterface < handle
             normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
             [B,A]=cheby1(2,6,[.1,10]/(obj.fs/2));
             fltrdData=normalize(filter(B,A,obj.outputLog.rawData));
+            newFs=obj.fs; %#ok<NASGU>
             
             % Subsample data at twice the high cutoff freq
             fltrdData=resample(fltrdData,20,obj.fs);
             newFs=20;
             
-            % Spatial filtering
-            %             fltrdData=TLIinterface.applyLapFilter(fltrdData);
+%             % Spatial filtering
+%             fltrdData=TLIinterface.applyLapFilter(fltrdData);
             
             % Recover relevant windows
             winLims=[-.2,.8];
@@ -774,6 +863,13 @@ classdef TLIinterface < handle
         
         function cTime=get.currTime(obj)
             cTime=get_param(obj.modelName,'SimulationTime');
+        end
+        
+        function tPos=get.targetPosLong(obj)
+            tPos=zeros(size(obj.outputLog.stimStart));
+            for currTrial=1:length(tPos)
+                tPos(currTrial)=obj.outputLog.targetPos(sum(obj.outputLog.trialStartTimes<obj.outputLog.stimStart(currTrial)));
+            end
         end
     end
     
