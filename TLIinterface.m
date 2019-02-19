@@ -42,6 +42,7 @@ classdef TLIinterface < handle
         selLevel;
         phrase;
         calErrChance;
+        maxTrials;
     end
     
     properties (Hidden)
@@ -260,6 +261,19 @@ classdef TLIinterface < handle
             % Initialize devices
             obj.isCalibrating=1;
             obj.maxItsPerTrial=3;
+            obj.maxTrials=300;
+            obj.initialize;
+        end
+        
+        function startTesting(obj)
+            % Clear logs
+            obj.outputLog=[];
+            obj.phrase=[];
+            
+            % Initialize devices
+            obj.isCalibrating=1;
+            obj.maxItsPerTrial=7;
+            obj.maxTrials=150;
             obj.initialize;
         end
          
@@ -387,7 +401,7 @@ classdef TLIinterface < handle
                 
                 % Provide feedback by changing expected destination target
                 % to selection result
-                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg);
                 set(obj.figureParams.letters(obj.movDirection),'BackgroundColor',obj.colorScheme.cursorColorRest);
                 set(obj.figureParams.fbPatch(obj.movDirection),'Visible','on');
                 set(obj.figureParams.cursorHandle2,'Visible','off');
@@ -474,10 +488,10 @@ classdef TLIinterface < handle
                     trialEndCondition=obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))>.95||obj.trialClassifier.scoreTransform(sum(obj.outputLog.trialScore(relIdx)))<.05;
                 end
                 if ~trialEndCondition&&obj.currIts<obj.maxItsPerTrial
-                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI,'EdgeColor',obj.colorScheme.bg);
+                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorMI);
                     obj.trialEventTimer.TimerFcn=@obj.performIteration;
                 else
-                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorRest,'EdgeColor',obj.colorScheme.bg);
+                    set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.cursorColorRest);
                     obj.trialEventTimer.TimerFcn=@obj.endTrial;
                 end
                 start(obj.trialEventTimer);
@@ -497,17 +511,21 @@ classdef TLIinterface < handle
                 if obj.isCalibrating
                     obj.finalLbls=obj.targetPos;
                     obj.logEntry({'finalLbls'});
+                    % Log result of actual prediction, then overwrite it so
+                    % that cursor always move in correct direction
                     obj.finalEst=mode(obj.outputLog.MIest(max(1,end-obj.currIts+1):end));
+                    obj.logEntry({'finalEst'});
+                    obj.finalEst=obj.targetPos;
                 else
                     obj.finalEst=(median(obj.outputLog.trialScore(max(1,end-obj.currIts+1):end))<0)+1;
+                    obj.logEntry({'finalEst'});
                 end
-                obj.logEntry({'finalEst'});
                 
                 % Update selection history so far
                 obj.selHistory=cat(1,obj.selHistory,obj.finalEst);
                 
                 % Provide feedback on final trial estimation
-                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg,'EdgeColor',obj.colorScheme.edgeColor);
+                set(obj.figureParams.cursorHandle,'FaceColor',obj.colorScheme.bg);
                 set(obj.figureParams.letters(obj.finalEst),'BackgroundColor',obj.colorScheme.targetColor,'EdgeColor',obj.colorScheme.bg);
                 
                 % Remove edge from target letters
@@ -515,12 +533,12 @@ classdef TLIinterface < handle
                 drawnow;
                 
                 % If calibration lasted long enough
-                if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=400
+                if obj.isCalibrating&&length(obj.outputLog.movCorrect)>=obj.maxTrials
                     fprintf('Calibration complete, shutting down.\n');
                     obj.stopCalibration;
                     return;
                 else
-                    fprintf('%d/400\n',length(obj.outputLog.movCorrect));
+                    fprintf('%d/%d\n',length(obj.outputLog.movCorrect),obj.maxTrials);
                 end
                 
                 % Update selection counter. If last level is reached, end
